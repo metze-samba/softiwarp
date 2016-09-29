@@ -295,6 +295,7 @@ static int siw_qp_prepare_tx(struct siw_iwarp_tx *c_tx)
 				return -EINVAL;
 			crypto_hash_final(&c_tx->mpa_crc_hd, (u8 *)crc);
 		}
+		c_tx->ctrl_len += MPA_CRC_SIZE;
 		return PKT_COMPLETE;
 	}
 	c_tx->ctrl_len += MPA_CRC_SIZE;
