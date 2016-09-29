@@ -769,7 +769,6 @@ static inline int siw_unseg_txlen(struct siw_iwarp_tx *c_tx)
 static void siw_prepare_fpdu(struct siw_qp *qp, struct siw_wqe *wqe)
 {
 	struct siw_iwarp_tx	*c_tx  = &qp->tx_ctx;
-	u8 opcode = __rdmap_opcode(&c_tx->pkt.ctrl);
 
 	/*
 	 * TODO: TCP Fragmentation dynamics needs for further investigation.
@@ -780,19 +779,6 @@ static void siw_prepare_fpdu(struct siw_qp *qp, struct siw_wqe *wqe)
 	 */
 	c_tx->ctrl_len = iwarp_pktinfo[__rdmap_opcode(&c_tx->pkt.ctrl)].hdr_len;
 	c_tx->ctrl_sent = 0;
-
-	dprint(DBG_TX, ": OP opcode 0x%x name %s hdr_len=%u ctrl 0x%04x (cpu 0x%04x)\n",
-			opcode,
-			iwarp_pktinfo[opcode].name,
-			iwarp_pktinfo[opcode].hdr_len,
-			iwarp_pktinfo[opcode].ctrl.ddp_rdmap_ctrl,
-			be16_to_cpu(((u16)iwarp_pktinfo[opcode].ctrl.ddp_rdmap_ctrl)));
-	//.hdr_len = sizeof(struct iwarp_rdma_rreq),
-	//.ctrl.mpa_len = htons(sizeof(struct iwarp_rdma_rreq) - 2),
-	//.ctrl.ddp_rdmap_ctrl = DDP_FLAG_LAST
-	//	| cpu_to_be16(DDP_VERSION << 8)
-	//	| cpu_to_be16(RDMAP_VERSION << 6)
-	//	| cpu_to_be16(RDMAP_RDMA_READ_REQ),
 
 	/*
 	 * Update target buffer offset if any
