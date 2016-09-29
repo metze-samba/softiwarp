@@ -278,15 +278,14 @@ static int siw_qp_prepare_tx(struct siw_iwarp_tx *c_tx)
 			data += -(int)data & 0x3;
 			/* point CRC after data or pad */
 			crc += data;
-			c_tx->ctrl_len += data + MPA_CRC_SIZE;
+			c_tx->ctrl_len += data;
 
 			if (!(c_tx->pkt.ctrl.ddp_rdmap_ctrl & DDP_FLAG_TAGGED))
 				c_tx->pkt.c_untagged.ddp_mo = 0;
 			else
 				c_tx->pkt.c_tagged.ddp_to =
 				    cpu_to_be64(wqe->sqe.raddr);
-		} else
-			c_tx->ctrl_len += MPA_CRC_SIZE;
+		}
 
 		*(u32 *)crc = 0;
 		/*
