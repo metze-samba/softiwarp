@@ -655,7 +655,6 @@ struct siw_qp {
 
 
 struct iwarp_msg_info {
-	const char *name;
 	int			hdr_len;
 	struct iwarp_ctrl	ctrl;
 	int (*proc_data)	(struct siw_qp *, struct siw_iwarp_rx *);

@@ -76,7 +76,6 @@ static char siw_qp_state_to_string[SIW_QP_STATE_COUNT][sizeof "TERMINATE"] = {
  * is initialized to minimum packet size.
  */
 struct iwarp_msg_info iwarp_pktinfo[RDMAP_TERMINATE + 1] = { {
-	.name = "RDMA_WRITE",
 	.hdr_len = sizeof(struct iwarp_rdma_write),
 	.ctrl.mpa_len = htons(sizeof(struct iwarp_rdma_write) - 2),
 	.ctrl.ddp_rdmap_ctrl = DDP_FLAG_TAGGED | DDP_FLAG_LAST
@@ -86,7 +85,6 @@ struct iwarp_msg_info iwarp_pktinfo[RDMAP_TERMINATE + 1] = { {
 	.proc_data = siw_proc_write
 },
 {
-	.name = "RDMA_RREQ",
 	.hdr_len = sizeof(struct iwarp_rdma_rreq),
 	.ctrl.mpa_len = htons(sizeof(struct iwarp_rdma_rreq) - 2),
 	.ctrl.ddp_rdmap_ctrl = DDP_FLAG_LAST
@@ -96,7 +94,6 @@ struct iwarp_msg_info iwarp_pktinfo[RDMAP_TERMINATE + 1] = { {
 	.proc_data = siw_proc_rreq
 },
 {
-	.name = "RDMA_RRESP",
 	.hdr_len = sizeof(struct iwarp_rdma_rresp),
 	.ctrl.mpa_len = htons(sizeof(struct iwarp_rdma_rresp) - 2),
 	.ctrl.ddp_rdmap_ctrl = DDP_FLAG_TAGGED | DDP_FLAG_LAST
@@ -106,7 +103,6 @@ struct iwarp_msg_info iwarp_pktinfo[RDMAP_TERMINATE + 1] = { {
 	.proc_data = siw_proc_rresp
 },
 {
-	.name = "SEND",
 	.hdr_len = sizeof(struct iwarp_send),
 	.ctrl.mpa_len = htons(sizeof(struct iwarp_send) - 2),
 	.ctrl.ddp_rdmap_ctrl = DDP_FLAG_LAST
@@ -116,7 +112,6 @@ struct iwarp_msg_info iwarp_pktinfo[RDMAP_TERMINATE + 1] = { {
 	.proc_data = siw_proc_send
 },
 {
-	.name = "SEND_INV",
 	.hdr_len = sizeof(struct iwarp_send_inv),
 	.ctrl.mpa_len = htons(sizeof(struct iwarp_send_inv) - 2),
 	.ctrl.ddp_rdmap_ctrl = DDP_FLAG_LAST
@@ -126,7 +121,6 @@ struct iwarp_msg_info iwarp_pktinfo[RDMAP_TERMINATE + 1] = { {
 	.proc_data = siw_proc_unsupp
 },
 {
-	.name = "SEND_SE",
 	.hdr_len = sizeof(struct iwarp_send),
 	.ctrl.mpa_len = htons(sizeof(struct iwarp_send) - 2),
 	.ctrl.ddp_rdmap_ctrl = DDP_FLAG_LAST
@@ -136,7 +130,6 @@ struct iwarp_msg_info iwarp_pktinfo[RDMAP_TERMINATE + 1] = { {
 	.proc_data = siw_proc_send
 },
 {
-	.name = "SEND_SE_INVAL",
 	.hdr_len = sizeof(struct iwarp_send_inv),
 	.ctrl.mpa_len = htons(sizeof(struct iwarp_send_inv) - 2),
 	.ctrl.ddp_rdmap_ctrl = DDP_FLAG_LAST
@@ -146,7 +139,6 @@ struct iwarp_msg_info iwarp_pktinfo[RDMAP_TERMINATE + 1] = { {
 	.proc_data = siw_proc_unsupp
 },
 {
-	.name = "TERMINATE",
 	.hdr_len = sizeof(struct iwarp_terminate),
 	.ctrl.mpa_len = htons(sizeof(struct iwarp_terminate) - 2),
 	.ctrl.ddp_rdmap_ctrl = DDP_FLAG_LAST
