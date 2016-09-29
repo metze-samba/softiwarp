@@ -208,7 +208,7 @@ static int siw_qp_prepare_tx(struct siw_iwarp_tx *c_tx)
 		break;
 
 	case SIW_OP_SEND:
-		if (tx_flags(wqe) & IB_SEND_SOLICITED)
+		if (0 && tx_flags(wqe) & IB_SEND_SOLICITED)
 			memcpy(&c_tx->pkt.ctrl,
 			       &iwarp_pktinfo[RDMAP_SEND_SE].ctrl,
 			       sizeof(struct iwarp_ctrl));
