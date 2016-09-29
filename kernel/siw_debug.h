@@ -113,6 +113,7 @@ extern void siw_debugfs_delete(void);
 
 extern void siw_print_hdr(union iwarp_hdrs *, int, char *);
 extern void siw_print_rctx(struct siw_iwarp_rx *);
+extern void siw_print_tx(struct siw_iwarp_tx *);
 extern void siw_print_qp_attr_mask(enum ib_qp_attr_mask, char *);
 
 #undef DEBUG
@@ -159,6 +160,7 @@ extern void siw_print_qp_attr_mask(enum ib_qp_attr_mask, char *);
 
 
 #define siw_dprint_rctx(r)	siw_print_rctx(r)
+#define siw_dprint_tx(r)	siw_print_tx(r)
 
 extern char ib_qp_state_to_string[IB_QPS_ERR+1][sizeof "RESET"];
 extern atomic_t siw_num_wqe;

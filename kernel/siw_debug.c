@@ -449,6 +449,25 @@ void siw_print_rctx(struct siw_iwarp_rx *rctx)
 	pr_info("<---------------\n");
 }
 
+void siw_print_tx(struct siw_iwarp_tx *tx)
+{
+	pr_info("---TX Context %p -->\n", tx);
+	siw_print_hdr(&tx->pkt.hdr, TX_QPID(tx), "\nCurrent Pkt:\t");
+	//pr_info("Skbuf State:\tp:0x%p, new:%d, off:%d, copied:%d\n",
+	//	rctx->skb, rctx->skb_new, rctx->skb_offset, rctx->skb_copied);
+	//pr_info("FPDU State:\trx_state:%d,\n\t\trcvd:%d, rem:%d, "
+	//	"pad:%d\n", rctx->state, rctx->fpdu_part_rcvd,
+	//	rctx->fpdu_part_rem, rctx->pad);
+	//pr_info("Rx Mem:\t\tp:0x%p, stag:0x%08x, mem_id:%d\n",
+	//	&rctx->wqe_active, rctx->ddp_stag, rctx->ddp_stag >> 8);
+	//pr_info("DDP State:\tprev_op:%d, first_seg:%d, "
+	//	"more_segs:%d\n", rctx->prev_rdmap_opcode, rctx->first_ddp_seg,
+	//	rctx->more_ddp_segs);
+	//pr_info("MPA State:\tlen:%d, crc_enabled:%d, crc:0x%x\n",
+	//	ntohs(rctx->hdr.ctrl.mpa_len), rctx->crc_enabled,
+	//	rctx->trailer.crc);
+	pr_info("<---------------\n");
+}
 #if DPRINT_MASK > 0
 atomic_t siw_num_wqe;
 
