@@ -181,6 +181,7 @@ static int siw_qp_prepare_tx(struct siw_iwarp_tx *c_tx)
 	int			data = 0;
 
 	dprint(DBG_TX, "(QP%d):\n", TX_QPID(c_tx));
+	siw_dprint_tx(c_tx);
 
 	switch (tx_type(wqe)) {
 
@@ -209,7 +210,7 @@ static int siw_qp_prepare_tx(struct siw_iwarp_tx *c_tx)
 		break;
 
 	case SIW_OP_SEND:
-		if (tx_flags(wqe) & IB_SEND_SOLICITED)
+		if (0 && tx_flags(wqe) & IB_SEND_SOLICITED)
 			memcpy(&c_tx->pkt.ctrl,
 			       &iwarp_pktinfo[RDMAP_SEND_SE].ctrl,
 			       sizeof(struct iwarp_ctrl));
@@ -268,7 +269,7 @@ static int siw_qp_prepare_tx(struct siw_iwarp_tx *c_tx)
 	c_tx->ctrl_sent = 0;
 
 	if (data >= 0) {
-		if (0 && data > 0) {
+		if (data > 0) {
 			wqe->processed = data;
 
 			c_tx->pkt.ctrl.mpa_len =
@@ -298,6 +299,8 @@ static int siw_qp_prepare_tx(struct siw_iwarp_tx *c_tx)
 			dprint(DBG_CRC, ": calling crypto_hash_final()\n");
 			dprint_hex_dump(DBG_CRC, (u8 *)crc, 4);
 		}
+		c_tx->ctrl_len += MPA_CRC_SIZE;
+			siw_dprint_tx(c_tx);
 		return PKT_COMPLETE;
 	}
 	c_tx->ctrl_len += MPA_CRC_SIZE;
