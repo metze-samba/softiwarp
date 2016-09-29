@@ -73,7 +73,6 @@ MODULE_PARM_DESC(low_delay_tx, "Run tight transmit thread loop if activated\n");
 
 static inline int siw_crc_txhdr(struct siw_iwarp_tx *ctx)
 {
-	dprint(DBG_CRC, ": ctx[%p] calling crypto_hash_init()\n", ctx);
 	crypto_hash_init(&ctx->mpa_crc_hd);
 	return siw_crc_array(&ctx->mpa_crc_hd, (u8 *)&ctx->pkt,
 			     ctx->ctrl_len);
@@ -255,7 +254,7 @@ static int siw_qp_prepare_tx(struct siw_iwarp_tx *c_tx)
 
 		dprint(DBG_TX, ": RRESP: Sink: %x, 0x%016llx\n",
 			wqe->sqe.rkey, wqe->sqe.raddr);
-		//dprint_hex_dump(DBG_CRC, ...);
+
 		crc = (char *)&c_tx->pkt.write_pkt.crc;
 		data = siw_try_1seg(c_tx, crc);
 		break;
@@ -268,7 +267,7 @@ static int siw_qp_prepare_tx(struct siw_iwarp_tx *c_tx)
 	c_tx->ctrl_sent = 0;
 
 	if (data >= 0) {
-		if (0 && data > 0) {
+		if (data > 0) {
 			wqe->processed = data;
 
 			c_tx->pkt.ctrl.mpa_len =
@@ -295,8 +294,6 @@ static int siw_qp_prepare_tx(struct siw_iwarp_tx *c_tx)
 			if (siw_crc_txhdr(c_tx) != 0)
 				return -EINVAL;
 			crypto_hash_final(&c_tx->mpa_crc_hd, (u8 *)crc);
-			dprint(DBG_CRC, ": calling crypto_hash_final()\n");
-			dprint_hex_dump(DBG_CRC, (u8 *)crc, 4);
 		}
 		return PKT_COMPLETE;
 	}
@@ -623,11 +620,9 @@ sge_done:
 	}
 	if (!c_tx->crc_enabled)
 		c_tx->trailer.crc = 0;
-	else if (do_crc) {
+	else if (do_crc)
 		crypto_hash_final(&c_tx->mpa_crc_hd, (u8 *)&c_tx->trailer.crc);
-			dprint(DBG_CRC, ": calling crypto_hash_final()\n");
-			dprint_hex_dump(DBG_CRC, (u8 *)&c_tx->trailer.crc, 4);
-	}
+
 	data_len = c_tx->bytes_unsent;
 
 	if (c_tx->tcp_seglen >= (int)MPA_MIN_FRAG &&
