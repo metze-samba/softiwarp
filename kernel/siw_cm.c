@@ -57,7 +57,7 @@
 
 static bool mpa_crc_strict = 1;
 module_param(mpa_crc_strict, bool, 0644);
-static bool mpa_crc_required;
+static bool mpa_crc_required = 1;
 module_param(mpa_crc_required, bool, 0644);
 static bool tcp_nodelay = 0;
 module_param(tcp_nodelay, bool, 0644);
