@@ -57,10 +57,11 @@ const int siw_debug = 0;
 int siw_query_device(struct ibv_context *ctx, struct ibv_device_attr *attr)
 {
 	struct ibv_query_device	cmd;
-	uint64_t		raw_fw_ver;
-	unsigned 		major, minor, sub_minor;
+	uint64_t		raw_fw_ver = 0;
+	unsigned 		major = 0, minor = 0, sub_minor = 0;
 	int			rv;
 
+	ZERO_STRUCT(cmd);
 	rv = ibv_cmd_query_device(ctx, attr, &raw_fw_ver, &cmd,
 	  			   sizeof cmd);
 	if (rv)
@@ -81,6 +82,7 @@ int siw_query_port(struct ibv_context *ctx, uint8_t port,
 {
 	struct ibv_query_port cmd;
 
+	ZERO_STRUCT(cmd);
 	return ibv_cmd_query_port(ctx, port, attr, &cmd, sizeof cmd);
 }
 
@@ -90,6 +92,7 @@ int siw_query_qp(struct ibv_qp *qp, struct ibv_qp_attr *attr,
 {
 	struct ibv_query_qp cmd;
 
+	ZERO_STRUCT(cmd);
 	return ibv_cmd_query_qp(qp, attr, attr_mask, init_attr, &cmd, sizeof(cmd));
 }
 
@@ -100,7 +103,10 @@ struct ibv_pd *siw_alloc_pd(struct ibv_context *ctx)
 	struct siw_alloc_pd_resp resp;
 	struct siw_pd 		 *pd;
 
-	pd = malloc(sizeof *pd);
+	ZERO_STRUCT(cmd);
+	ZERO_STRUCT(resp);
+
+	pd = calloc(1, sizeof *pd);
 	if (!pd)
 		return NULL;
 
@@ -134,7 +140,10 @@ struct ibv_mr *siw_reg_mr(struct ibv_pd *pd, void *addr,
 
 	int		rv;
 
-	mr = malloc(sizeof *mr);
+	ZERO_STRUCT(req);
+	ZERO_STRUCT(resp);
+
+	mr = calloc(1, sizeof *mr);
 
 	if (!mr)
 		return NULL;
@@ -171,6 +180,9 @@ struct ibv_cq *siw_create_cq(struct ibv_context *ctx, int num_cqe,
 	struct siw_cmd_create_cq	cmd;
 	struct siw_cmd_create_cq_resp	resp;
 	int				rv;
+
+	ZERO_STRUCT(cmd);
+	ZERO_STRUCT(resp);
 
 	cq = calloc(1, sizeof *cq);
 	if (!cq)
@@ -256,6 +268,9 @@ struct ibv_srq *siw_create_srq(struct ibv_pd *pd,
 	struct siw_cmd_create_srq_resp	resp;
 	struct siw_srq			*srq = calloc(1, sizeof *srq);
 
+	ZERO_STRUCT(cmd);
+	ZERO_STRUCT(resp);
+
 	if (!srq)
 		return NULL;
 
@@ -295,6 +310,8 @@ int siw_modify_srq(struct ibv_srq *ofa_srq, struct ibv_srq_attr *attr,
 	struct ibv_modify_srq	cmd;
 	int			rv;
 
+	ZERO_STRUCT(cmd);
+
 	pthread_spin_lock(&srq->lock);
 	rv = ibv_cmd_modify_srq(ofa_srq, attr, attr_mask, &cmd, sizeof cmd);
 	pthread_spin_unlock(&srq->lock);
@@ -327,6 +344,9 @@ struct ibv_qp *siw_create_qp(struct ibv_pd *pd, struct ibv_qp_init_attr *attr)
 	struct siw_context		*ctx = ctx_ofa2siw(ofa_ctx);
 
 	int				rv;
+
+	ZERO_STRUCT(cmd);
+	ZERO_STRUCT(resp);
 
 	qp = calloc(1, sizeof *qp);
 	if (!qp)
@@ -411,6 +431,8 @@ int siw_modify_qp(struct ibv_qp *ofaqp, struct ibv_qp_attr *attr,
 	struct siw_qp		*qp = qp_ofa2siw(ofaqp);
 	struct ibv_modify_qp	cmd;
 	int			rv;
+
+	ZERO_STRUCT(cmd);
 
 	if (siw_debug)
 		printf("modify QP[%d]\n", qp->id);

@@ -226,6 +226,9 @@ static int siw_db_ofa(struct ibv_qp *ofa_qp)
 	struct ibv_post_send_resp resp;
 	int rv;
 
+	ZERO_STRUCT(req);
+	ZERO_STRUCT(resp);
+
 	req.command	= IB_USER_VERBS_CMD_POST_SEND;
 	req.in_words	= (sizeof req) / 4;
 	req.out_words	= (sizeof resp) / 4;
@@ -248,7 +251,7 @@ int siw_post_send_mapped(struct ibv_qp *ofa_qp, struct ibv_send_wr *wr,
 			 struct ibv_send_wr **bad_wr)
 {
 	struct siw_qp	*qp = qp_ofa2siw(ofa_qp);
-	uint32_t	sq_put;
+	uint32_t	sq_put = 0;
 	int		rv = 0;
 
 	pthread_spin_lock(&qp->sq_lock);
@@ -331,7 +334,7 @@ int siw_post_recv_mapped(struct ibv_qp *ofa_qp, struct ibv_recv_wr *wr,
 			 struct ibv_recv_wr **bad_wr)
 {
 	struct siw_qp	*qp = qp_ofa2siw(ofa_qp);
-	uint32_t	rq_put;
+	uint32_t	rq_put = 0;
 	int		rv = 0;
 
 	pthread_spin_lock(&qp->rq_lock);
@@ -373,7 +376,7 @@ int siw_post_srq_recv_mapped(struct ibv_srq *ofa_srq, struct ibv_recv_wr *wr,
 			     struct ibv_recv_wr **bad_wr)
 {
 	struct siw_srq	*srq = srq_ofa2siw(ofa_srq);
-	uint32_t	srq_put;
+	uint32_t	srq_put = 0;
 	int rv = 0;
 
 	pthread_spin_lock(&srq->lock);

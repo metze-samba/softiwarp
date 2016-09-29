@@ -42,6 +42,7 @@
 #include <pthread.h>
 #include <inttypes.h>
 #include <stddef.h>
+#include <string.h>
 
 #include <infiniband/driver.h>
 #include <infiniband/arch.h>
@@ -122,6 +123,8 @@ struct siw_context {
 	uint32_t		dev_id;
 };
 
+
+#define ZERO_STRUCT(x) memset((char *)&(x), 0, sizeof(x))
 
 #undef offsetof
 #ifdef __compiler_offsetof

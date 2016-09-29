@@ -87,7 +87,10 @@ static struct ibv_context *siw_alloc_context(struct ibv_device *ofa_dev, int fd)
 	struct siw_alloc_ucontext_resp resp;
 	struct siw_device *siw_dev = dev_ofa2siw(ofa_dev);
 
-	context = malloc(sizeof *context);
+	ZERO_STRUCT(cmd);
+	ZERO_STRUCT(resp);
+
+	context = calloc(1, sizeof *context);
 
 	if (!context)
 		return NULL;
@@ -197,7 +200,7 @@ static struct ibv_device *siw_driver_init(const char *uverbs_sys_path,
 	    (if_type != SIW_IF_OFED && if_type != SIW_IF_MAPPED))
 		return NULL;
 
-	dev = malloc(sizeof *dev);
+	dev = calloc(1, sizeof *dev);
 	if (!dev)
 		return NULL;
 
