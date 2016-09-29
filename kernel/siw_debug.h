@@ -99,7 +99,7 @@ DBG_CM|DBG_EH|DBG_MM|DBG_OBJ|DBG_TMP|DBG_DM|DBG_ON)
  * DBG_KT|DBG_ON		Kernel threads
  * DBG_ALL			All categories
  */
-#define DPRINT_MASK	(DBG_ON)
+#define DPRINT_MASK	(DBG_ON|DBG_ALL)
 
 struct siw_dev;
 struct siw_iwarp_rx;
