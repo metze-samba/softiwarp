@@ -82,6 +82,7 @@
 #define DBG_DM		0x00001000
 #define DBG_HDR		0x00002000
 #define DBG_CQ		0x00004000
+#define DBG_CRC		0x00008000
 #define DBG_ALL		(DBG_IRQ|DBG_KT|DBG_SK|DBG_RX|DBG_TX|DBG_WR|\
 DBG_CM|DBG_EH|DBG_MM|DBG_OBJ|DBG_TMP|DBG_DM|DBG_ON|DBG_HDR|DBG_CQ)
 #define DBG_ALL_NOHDR	(DBG_IRQ|DBG_KT|DBG_SK|DBG_RX|DBG_TX|DBG_WR|\
@@ -99,7 +100,7 @@ DBG_CM|DBG_EH|DBG_MM|DBG_OBJ|DBG_TMP|DBG_DM|DBG_ON)
  * DBG_KT|DBG_ON		Kernel threads
  * DBG_ALL			All categories
  */
-#define DPRINT_MASK	(DBG_ON|DBG_ALL)
+#define DPRINT_MASK	(DBG_ON|DBG_TX|DBG_CRC)
 
 struct siw_dev;
 struct siw_iwarp_rx;
@@ -146,6 +147,14 @@ extern void siw_print_qp_attr_mask(enum ib_qp_attr_mask, char *);
 					current_thread_info()->cpu,	\
 					__func__, ## args);		\
 		}							\
+	} while (0)
+
+#define dprint_hex_dump(dbgcat, ptr, len)				\
+	do {								\
+		if ((dbgcat) & DPRINT_MASK) {				\
+			print_hex_dump(KERN_INFO, "", DUMP_PREFIX_OFFSET, 16, 1, \
+				       ptr, len, false); \
+		} \
 	} while (0)
 
 
