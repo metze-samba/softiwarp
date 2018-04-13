@@ -508,7 +508,6 @@ struct ib_qp *siw_create_qp(struct ib_pd *ofa_pd,
 	 * but not for a QP unable to hold any WQE (SQ + RQ)
 	 */
 	if (attrs->cap.max_send_wr + attrs->cap.max_recv_wr == 0) {
-		dprint(DBG_ON, ": line %s:%d\n", __FILE__, __LINE__);
 		rv = -EINVAL;
 		goto err_out;
 	}
@@ -540,10 +539,8 @@ struct ib_qp *siw_create_qp(struct ib_pd *ofa_pd,
 		qp->kernel_verbs = 1;
 
 	rv = siw_qp_add(sdev, qp);
-	if (rv) {
-		dprint(DBG_ON, ": line %s:%d\n", __FILE__, __LINE__);
+	if (rv)
 		goto err_out;
-	}
 
 	num_sqe = roundup_pow_of_two(attrs->cap.max_send_wr);
 	num_rqe = roundup_pow_of_two(attrs->cap.max_recv_wr);
@@ -563,7 +560,6 @@ struct ib_qp *siw_create_qp(struct ib_pd *ofa_pd,
 		if (attrs->sq_sig_type == IB_SIGNAL_ALL_WR)
 			qp->attrs.flags |= SIW_SIGNAL_ALL_WR;
 		else {
-		dprint(DBG_ON, ": line %s:%d\n", __FILE__, __LINE__);
 			rv = -EINVAL;
 			goto err_out_idr;
 		}
@@ -640,10 +636,8 @@ struct ib_qp *siw_create_qp(struct ib_pd *ofa_pd,
 				pr_warn("Preparing mmap RQ failed\n");
 		}
 		rv = ib_copy_to_udata(udata, &uresp, sizeof(uresp));
-		if (rv) {
-		dprint(DBG_ON, ": line %s:%d\n", __FILE__, __LINE__);
+		if (rv)
 			goto err_out_idr;
-		}
 	}
 	atomic_set(&qp->tx_ctx.in_use, 0);
 
@@ -658,24 +652,15 @@ struct ib_qp *siw_create_qp(struct ib_pd *ofa_pd,
 
 	qp->cpu = (smp_processor_id() + 1) % MAX_CPU;
 
-		dprint(DBG_ON, ": line %s:%d\n", __FILE__, __LINE__);
 	return &qp->ofa_qp;
 
 err_out_idr:
-		dprint(DBG_ON, ": line %s:%d\n", __FILE__, __LINE__);
 	siw_remove_obj(&sdev->idr_lock, &sdev->qp_idr, &qp->hdr);
-		dprint(DBG_ON, ": line %s:%d\n", __FILE__, __LINE__);
 err_out:
-		dprint(DBG_ON, ": line %s:%d\n", __FILE__, __LINE__);
-	if (scq) {
+	if (scq)
 		siw_cq_put(scq);
-		dprint(DBG_ON, ": line %s:%d\n", __FILE__, __LINE__);
-	}
-	if (rcq) {
+	if (rcq)
 		siw_cq_put(rcq);
-		dprint(DBG_ON, ": line %s:%d\n", __FILE__, __LINE__);
-	}
-		dprint(DBG_ON, ": line %s:%d\n", __FILE__, __LINE__);
 
 	if (qp) {
 		if (qp->sendq)
@@ -686,7 +671,6 @@ err_out:
 	}
 	atomic_dec(&sdev->num_qp);
 
-		dprint(DBG_ON, ": line %s:%d %d\n", __FILE__, __LINE__, rv);
 	return ERR_PTR(rv);
 }
 
@@ -788,7 +772,7 @@ int siw_destroy_qp(struct ib_qp *ofa_qp)
 
 	dprint(DBG_CM, "(QP%d): SIW QP state=%d, cep=0x%p\n",
 		QP_ID(qp), qp->attrs.state, qp->cep);
-	dump_stack();
+
 	/*
 	 * Mark QP as in process of destruction to prevent from eventual async
 	 * callbacks to OFA core
