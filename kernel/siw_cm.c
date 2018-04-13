@@ -437,12 +437,6 @@ static int siw_cm_upcall(struct siw_cep *cep, enum iw_cm_event_type reason,
 		}
 		to_sockaddr_in(event.local_addr) = cep->llp.laddr;
 		to_sockaddr_in(event.remote_addr) = cep->llp.raddr;
-{
-		dprint(DBG_CM,
-			"(cep=0x%p,id=0x%p): laddr: %pISpsfc; "
-			"raddr: %pISpsfc\n",
-			cep, cm_id, &event.local_addr, &event.remote_addr);
-}
 	}
 	/* Signal IRD and ORD */
 	if (reason == IW_CM_EVENT_ESTABLISHED ||
@@ -1109,13 +1103,6 @@ static void siw_accept_newconn(struct siw_cep *cep)
 			cep, rv);
 		goto error;
 	}
-
-{
-		dprint(DBG_CM,
-			"(new_cep=0x%p): laddr: %pISpsfc; "
-			"raddr: %pISpsfc\n",
-			new_cep, &new_cep->llp.laddr, &new_cep->llp.raddr);
-}
 
 	new_cep->state = SIW_EPSTATE_AWAIT_MPAREQ;
 
