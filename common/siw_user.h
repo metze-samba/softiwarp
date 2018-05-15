@@ -52,7 +52,7 @@
 
 #define VERSION_ID_SOFTIWARP	2
 
-#define SIW_MAX_SGE		6
+#define SIW_MAX_SGE		16
 #define SIW_MAX_UOBJ_KEY	0xffffff
 #define SIW_INVAL_UOBJ_KEY	(SIW_MAX_UOBJ_KEY + 1)
 
