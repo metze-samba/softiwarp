@@ -1550,6 +1550,7 @@ struct ib_mr *siw_alloc_mr(struct ib_pd *ofa_pd, enum ib_mr_type mr_type,
 		rv = -ENOMEM;
 		goto err_out;
 	}
+	dprint(DBG_ON, ": line %s:%d max_sge[%u]\n", __FILE__, __LINE__, max_sge);
 	pbl = siw_pbl_alloc(max_sge);
 	if (IS_ERR(pbl)) {
 		rv = PTR_ERR(pbl);

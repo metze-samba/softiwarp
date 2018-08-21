@@ -154,16 +154,23 @@ struct siw_pbl *siw_pbl_alloc(u32 num_buf)
 	struct siw_pbl *pbl;
 	int buf_size = sizeof(*pbl);
 
+	dprint(DBG_ON, ": line %s:%d num_buf[%u]\n", __FILE__, __LINE__, num_buf);
+	dprint(DBG_ON, ": line %s:%d buf_size[%d]\n", __FILE__, __LINE__, buf_size);
+
 	if (num_buf == 0)
 		return ERR_PTR(-EINVAL);
 
+	dprint(DBG_ON, ": line %s:%d buf_size[%d]\n", __FILE__, __LINE__, buf_size);
 	buf_size += ((num_buf - 1) * sizeof(struct siw_pble));
+	dprint(DBG_ON, ": line %s:%d buf_size[%d]\n", __FILE__, __LINE__, buf_size);
 
 	pbl = kzalloc(buf_size, GFP_KERNEL);
 	if (!pbl)
 		return ERR_PTR(-ENOMEM);
 
+	dprint(DBG_ON, ": line %s:%d num_buf[%u]\n", __FILE__, __LINE__, num_buf);
 	pbl->max_buf = num_buf;
+	dprint(DBG_ON, ": line %s:%d num_buf[%u]\n", __FILE__, __LINE__, num_buf);
 
 	return pbl;
 }
