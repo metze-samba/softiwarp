@@ -1558,19 +1558,16 @@ struct ib_mr *siw_alloc_mr(struct ib_pd *ofa_pd, enum ib_mr_type mr_type,
 		pbl = NULL;
 		goto err_out;
 	}
-	dprint(DBG_ON, ": line %s:%d pbl[%p]\n", __FILE__, __LINE__, pbl);
 	mr = siw_create_mr(sdev, pbl, 0, max_sge * PAGE_SIZE, 0);
-	dprint(DBG_ON, ": line %s:%d mr[%p]\n", __FILE__, __LINE__, mr);
 	if (!mr) {
 		rv = -ENOMEM;
 		goto err_out;
 	}
-	dprint(DBG_ON, ": line %s:%d mr->mem_obj[%p]\n", __FILE__, __LINE__, mr->mem_obj);
 	mr->mem.is_pbl = 1;
 	mr->pd = pd;
 	siw_pd_get(pd);
 
-	dprint(DBG_ON, " MEM(%d): Created with %u SGEs\n", OBJ_ID(&mr->mem),
+	dprint(DBG_MM, " MEM(%d): Created with %u SGEs\n", OBJ_ID(&mr->mem),
 		max_sge);
 
 	return &mr->ofa_mr;
