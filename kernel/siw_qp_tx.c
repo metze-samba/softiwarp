@@ -100,20 +100,35 @@ static int siw_try_1seg(struct siw_iwarp_tx *c_tx, char *payload)
 	struct siw_sge *sge = &wqe->sqe.sge[0];
 	u32 bytes = sge->length;
 
+	dprint(DBG_ON, ": line %s:%d \n", __FILE__, __LINE__);
 	if (bytes > MAX_HDR_INLINE || wqe->sqe.num_sge != 1)
 		return -1;
 
+	dprint(DBG_ON, ": line %s:%d \n", __FILE__, __LINE__);
 	if (bytes == 0)
 		return 0;
 
+	dprint(DBG_ON, ": line %s:%d \n", __FILE__, __LINE__);
 	if (tx_flags(wqe) & SIW_WQE_INLINE)
 		memcpy(payload, &wqe->sqe.sge[1], bytes);
 	else {
 		struct siw_mr *mr = siw_mem2mr(wqe->mem[0].obj);
 
-		if (!mr->mem_obj) /* Kernel client using kva */
+	dprint(DBG_ON, ": line %s:%d \n", __FILE__, __LINE__);
+	dprint(DBG_ON, ": line %s:%d mr[%p]\n", __FILE__, __LINE__, mr);
+	dprint(DBG_ON, ": line %s:%d mr->mem_obj[%p]\n", __FILE__, __LINE__, mr->mem_obj);
+	dprint(DBG_ON, ": line %s:%d c_tx[%p]\n", __FILE__, __LINE__, c_tx);
+		if (!mr->mem_obj) /* Kernel client using kva */ {
+	dprint(DBG_ON, ": line %s:%d \n", __FILE__, __LINE__);
+	dprint(DBG_ON, ": line %s:%d sge[%p] bytes[%u]\n", __FILE__, __LINE__, sge, bytes);
+	dprint(DBG_ON, ": line %s:%d sge->laddr[%llu]\n", __FILE__, __LINE__, sge->laddr);
+	dprint(DBG_ON, ": line %s:%d payload[%p]\n", __FILE__, __LINE__, payload);
+			memset(payload, 0xAB, bytes);
+	dprint(DBG_ON, ": line %s:%d payload[%p]\n", __FILE__, __LINE__, payload);
 			memcpy(payload, (void *)sge->laddr, bytes);
-		else if (c_tx->in_syscall) {
+	dprint(DBG_ON, ": line %s:%d \n", __FILE__, __LINE__);
+		} else if (c_tx->in_syscall) {
+	dprint(DBG_ON, ": line %s:%d \n", __FILE__, __LINE__);
 			if (copy_from_user(payload,
 					   (void *)sge->laddr,
 					   bytes)) {
@@ -121,30 +136,42 @@ static int siw_try_1seg(struct siw_iwarp_tx *c_tx, char *payload)
 				return -1;
 			}
 		} else {
-			unsigned int off = sge->laddr & ~PAGE_MASK;
+			unsigned int off;
 			struct page *p;
 			char *buffer;
 			int pbl_idx = 0;
 
+	dprint(DBG_ON, ": line %s:%d \n", __FILE__, __LINE__);
+			off = sge->laddr & ~PAGE_MASK;
+	dprint(DBG_ON, ": line %s:%d \n", __FILE__, __LINE__);
 			if (!mr->mem.is_pbl)
 				p = siw_get_upage(mr->umem, sge->laddr);
 			else
 				p = siw_get_pblpage(mr, sge->laddr, &pbl_idx);
 
+	dprint(DBG_ON, ": line %s:%d \n", __FILE__, __LINE__);
 			BUG_ON(!p);
 
 			buffer = kmap_atomic(p);
 
+	dprint(DBG_ON, ": line %s:%d \n", __FILE__, __LINE__);
 			if (likely(PAGE_SIZE - off >= bytes)) {
+	dprint(DBG_ON, ": line %s:%d \n", __FILE__, __LINE__);
 				memcpy(payload, buffer + off, bytes);
+	dprint(DBG_ON, ": line %s:%d \n", __FILE__, __LINE__);
 				kunmap_atomic(buffer);
+	dprint(DBG_ON, ": line %s:%d \n", __FILE__, __LINE__);
 			} else {
 				unsigned long part = bytes - (PAGE_SIZE - off);
 
+	dprint(DBG_ON, ": line %s:%d \n", __FILE__, __LINE__);
 				memcpy(payload, buffer + off, part);
+	dprint(DBG_ON, ": line %s:%d \n", __FILE__, __LINE__);
 				kunmap_atomic(buffer);
+	dprint(DBG_ON, ": line %s:%d \n", __FILE__, __LINE__);
 				payload += part;
 
+	dprint(DBG_ON, ": line %s:%d \n", __FILE__, __LINE__);
 				if (!mr->mem.is_pbl)
 					p = siw_get_upage(mr->umem,
 							  sge->laddr + part);
@@ -152,14 +179,22 @@ static int siw_try_1seg(struct siw_iwarp_tx *c_tx, char *payload)
 					p = siw_get_pblpage(mr,
 							    sge->laddr + part,
 							    &pbl_idx);
+	dprint(DBG_ON, ": line %s:%d \n", __FILE__, __LINE__);
 				BUG_ON(!p);
 
+	dprint(DBG_ON, ": line %s:%d \n", __FILE__, __LINE__);
 				buffer = kmap_atomic(p);
+	dprint(DBG_ON, ": line %s:%d \n", __FILE__, __LINE__);
 				memcpy(payload, buffer, bytes - part);
+	dprint(DBG_ON, ": line %s:%d \n", __FILE__, __LINE__);
 				kunmap_atomic(buffer);
+	dprint(DBG_ON, ": line %s:%d \n", __FILE__, __LINE__);
 			}
+	dprint(DBG_ON, ": line %s:%d \n", __FILE__, __LINE__);
 		}
+	dprint(DBG_ON, ": line %s:%d \n", __FILE__, __LINE__);
 	}
+	dprint(DBG_ON, ": line %s:%d \n", __FILE__, __LINE__);
 	return (int)bytes;
 }
 
@@ -224,6 +259,7 @@ static int siw_qp_prepare_tx(struct siw_iwarp_tx *c_tx)
 		c_tx->ctrl_len = sizeof(struct iwarp_send);
 
 		crc = (char *)&c_tx->pkt.send_pkt.crc;
+	dprint(DBG_ON, ": line %s:%d \n", __FILE__, __LINE__);
 		data = siw_try_1seg(c_tx, crc);
 		break;
 
@@ -247,6 +283,7 @@ static int siw_qp_prepare_tx(struct siw_iwarp_tx *c_tx)
 		c_tx->ctrl_len = sizeof(struct iwarp_send_inv);
 
 		crc = (char *)&c_tx->pkt.send_pkt.crc;
+	dprint(DBG_ON, ": line %s:%d \n", __FILE__, __LINE__);
 		data = siw_try_1seg(c_tx, crc);
 		break;
 
@@ -259,6 +296,7 @@ static int siw_qp_prepare_tx(struct siw_iwarp_tx *c_tx)
 		c_tx->ctrl_len = sizeof(struct iwarp_rdma_write);
 
 		crc = (char *)&c_tx->pkt.write_pkt.crc;
+	dprint(DBG_ON, ": line %s:%d \n", __FILE__, __LINE__);
 		data = siw_try_1seg(c_tx, crc);
 		break;
 
