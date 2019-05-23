@@ -1,41 +1,7 @@
-/*
- * Software iWARP device driver for Linux
- *
- * Authors: Bernard Metzler <bmt@zurich.ibm.com>
- *          Fredy Neeser <nfd@zurich.ibm.com>
- *
- * Copyright (c) 2008-2016, IBM Corporation
- *
- * This software is available to you under a choice of one of two
- * licenses.  You may choose to be licensed under the terms of the GNU
- * General Public License (GPL) Version 2, available from the file
- * COPYING in the main directory of this source tree, or the
- * BSD license below:
- *
- *   Redistribution and use in source and binary forms, with or
- *   without modification, are permitted provided that the following
- *   conditions are met:
- *
- *   - Redistributions of source code must retain the above copyright notice,
- *     this list of conditions and the following disclaimer.
- *
- *   - Redistributions in binary form must reproduce the above copyright
- *     notice, this list of conditions and the following disclaimer in the
- *     documentation and/or other materials provided with the distribution.
- *
- *   - Neither the name of IBM nor the names of its contributors may be
- *     used to endorse or promote products derived from this software without
- *     specific prior written permission.
- *
- * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND,
- * EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
- * MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND
- * NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS
- * BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN
- * ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN
- * CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
- * SOFTWARE.
- */
+// SPDX-License-Identifier: GPL-2.0 or BSD-3-Clause
+
+/* Authors: Bernard Metzler <bmt@zurich.ibm.com> */
+/* Copyright (c) 2008-2019, IBM Corporation */
 
 #include <linux/errno.h>
 #include <linux/types.h>
@@ -55,124 +21,100 @@
 #include <rdma/ib_user_verbs.h>
 
 #include "siw.h"
-#include "siw_obj.h"
 #include "siw_cm.h"
+#include "siw_verbs.h"
+#include "siw_mem.h"
+#include "siw_debug.h"
 
-
-#if DPRINT_MASK > 0
 static char siw_qp_state_to_string[SIW_QP_STATE_COUNT][sizeof "TERMINATE"] = {
-	[SIW_QP_STATE_IDLE]		= "IDLE",
-	[SIW_QP_STATE_RTR]		= "RTR",
-	[SIW_QP_STATE_RTS]		= "RTS",
-	[SIW_QP_STATE_CLOSING]		= "CLOSING",
-	[SIW_QP_STATE_TERMINATE]	= "TERMINATE",
-	[SIW_QP_STATE_ERROR]		= "ERROR",
-	[SIW_QP_STATE_MORIBUND]		= "MORIBUND",
-	[SIW_QP_STATE_UNDEF]		= "UNDEF"
+	[SIW_QP_STATE_IDLE] = "IDLE",
+	[SIW_QP_STATE_RTR] = "RTR",
+	[SIW_QP_STATE_RTS] = "RTS",
+	[SIW_QP_STATE_CLOSING] = "CLOSING",
+	[SIW_QP_STATE_TERMINATE] = "TERMINATE",
+	[SIW_QP_STATE_ERROR] = "ERROR"
 };
-#endif
 
 /*
  * iWARP (RDMAP, DDP and MPA) parameters as well as Softiwarp settings on a
  * per-RDMAP message basis. Please keep order of initializer. All MPA len
  * is initialized to minimum packet size.
  */
-struct iwarp_msg_info iwarp_pktinfo[RDMAP_TERMINATE + 1] = { {
-	.hdr_len = sizeof(struct iwarp_rdma_write),
-	.ctrl.mpa_len = htons(sizeof(struct iwarp_rdma_write) - 2),
-	.ctrl.ddp_rdmap_ctrl = DDP_FLAG_TAGGED | DDP_FLAG_LAST
-		| cpu_to_be16(DDP_VERSION << 8)
-		| cpu_to_be16(RDMAP_VERSION << 6)
-		| cpu_to_be16(RDMAP_RDMA_WRITE),
-	.proc_data = siw_proc_write
-},
-{
-	.hdr_len = sizeof(struct iwarp_rdma_rreq),
-	.ctrl.mpa_len = htons(sizeof(struct iwarp_rdma_rreq) - 2),
-	.ctrl.ddp_rdmap_ctrl = DDP_FLAG_LAST
-		| cpu_to_be16(DDP_VERSION << 8)
-		| cpu_to_be16(RDMAP_VERSION << 6)
-		| cpu_to_be16(RDMAP_RDMA_READ_REQ),
-	.proc_data = siw_proc_rreq
-},
-{
-	.hdr_len = sizeof(struct iwarp_rdma_rresp),
-	.ctrl.mpa_len = htons(sizeof(struct iwarp_rdma_rresp) - 2),
-	.ctrl.ddp_rdmap_ctrl = DDP_FLAG_TAGGED | DDP_FLAG_LAST
-		| cpu_to_be16(DDP_VERSION << 8)
-		| cpu_to_be16(RDMAP_VERSION << 6)
-		| cpu_to_be16(RDMAP_RDMA_READ_RESP),
-	.proc_data = siw_proc_rresp
-},
-{
-	.hdr_len = sizeof(struct iwarp_send),
-	.ctrl.mpa_len = htons(sizeof(struct iwarp_send) - 2),
-	.ctrl.ddp_rdmap_ctrl = DDP_FLAG_LAST
-		| cpu_to_be16(DDP_VERSION << 8)
-		| cpu_to_be16(RDMAP_VERSION << 6)
-		| cpu_to_be16(RDMAP_SEND),
-	.proc_data = siw_proc_send
-},
-{
-	.hdr_len = sizeof(struct iwarp_send_inv),
-	.ctrl.mpa_len = htons(sizeof(struct iwarp_send_inv) - 2),
-	.ctrl.ddp_rdmap_ctrl = DDP_FLAG_LAST
-		| cpu_to_be16(DDP_VERSION << 8)
-		| cpu_to_be16(RDMAP_VERSION << 6)
-		| cpu_to_be16(RDMAP_SEND_INVAL),
-	.proc_data = siw_proc_unsupp
-},
-{
-	.hdr_len = sizeof(struct iwarp_send),
-	.ctrl.mpa_len = htons(sizeof(struct iwarp_send) - 2),
-	.ctrl.ddp_rdmap_ctrl = DDP_FLAG_LAST
-		| cpu_to_be16(DDP_VERSION << 8)
-		| cpu_to_be16(RDMAP_VERSION << 6)
-		| cpu_to_be16(RDMAP_SEND_SE),
-	.proc_data = siw_proc_send
-},
-{
-	.hdr_len = sizeof(struct iwarp_send_inv),
-	.ctrl.mpa_len = htons(sizeof(struct iwarp_send_inv) - 2),
-	.ctrl.ddp_rdmap_ctrl = DDP_FLAG_LAST
-		| cpu_to_be16(DDP_VERSION << 8)
-		| cpu_to_be16(RDMAP_VERSION << 6)
-		| cpu_to_be16(RDMAP_SEND_SE_INVAL),
-	.proc_data = siw_proc_unsupp
-},
-{
-	.hdr_len = sizeof(struct iwarp_terminate),
-	.ctrl.mpa_len = htons(sizeof(struct iwarp_terminate) - 2),
-	.ctrl.ddp_rdmap_ctrl = DDP_FLAG_LAST
-		| cpu_to_be16(DDP_VERSION << 8)
-		| cpu_to_be16(RDMAP_VERSION << 6)
-		| cpu_to_be16(RDMAP_TERMINATE),
-	.proc_data = siw_proc_terminate
-} };
+struct iwarp_msg_info iwarp_pktinfo[RDMAP_TERMINATE + 1] = {
+	{ /* RDMAP_RDMA_WRITE */
+	  .hdr_len = sizeof(struct iwarp_rdma_write),
+	  .ctrl.mpa_len = htons(sizeof(struct iwarp_rdma_write) - 2),
+	  .ctrl.ddp_rdmap_ctrl = DDP_FLAG_TAGGED | DDP_FLAG_LAST |
+				 cpu_to_be16(DDP_VERSION << 8) |
+				 cpu_to_be16(RDMAP_VERSION << 6) |
+				 cpu_to_be16(RDMAP_RDMA_WRITE),
+	  .proc_data = siw_proc_write },
+	{ /* RDMAP_RDMA_READ_REQ */
+	  .hdr_len = sizeof(struct iwarp_rdma_rreq),
+	  .ctrl.mpa_len = htons(sizeof(struct iwarp_rdma_rreq) - 2),
+	  .ctrl.ddp_rdmap_ctrl = DDP_FLAG_LAST | cpu_to_be16(DDP_VERSION << 8) |
+				 cpu_to_be16(RDMAP_VERSION << 6) |
+				 cpu_to_be16(RDMAP_RDMA_READ_REQ),
+	  .proc_data = siw_proc_rreq },
+	{ /* RDMAP_RDMA_READ_RESP */
+	  .hdr_len = sizeof(struct iwarp_rdma_rresp),
+	  .ctrl.mpa_len = htons(sizeof(struct iwarp_rdma_rresp) - 2),
+	  .ctrl.ddp_rdmap_ctrl = DDP_FLAG_TAGGED | DDP_FLAG_LAST |
+				 cpu_to_be16(DDP_VERSION << 8) |
+				 cpu_to_be16(RDMAP_VERSION << 6) |
+				 cpu_to_be16(RDMAP_RDMA_READ_RESP),
+	  .proc_data = siw_proc_rresp },
+	{ /* RDMAP_SEND */
+	  .hdr_len = sizeof(struct iwarp_send),
+	  .ctrl.mpa_len = htons(sizeof(struct iwarp_send) - 2),
+	  .ctrl.ddp_rdmap_ctrl = DDP_FLAG_LAST | cpu_to_be16(DDP_VERSION << 8) |
+				 cpu_to_be16(RDMAP_VERSION << 6) |
+				 cpu_to_be16(RDMAP_SEND),
+	  .proc_data = siw_proc_send },
+	{ /* RDMAP_SEND_INVAL */
+	  .hdr_len = sizeof(struct iwarp_send_inv),
+	  .ctrl.mpa_len = htons(sizeof(struct iwarp_send_inv) - 2),
+	  .ctrl.ddp_rdmap_ctrl = DDP_FLAG_LAST | cpu_to_be16(DDP_VERSION << 8) |
+				 cpu_to_be16(RDMAP_VERSION << 6) |
+				 cpu_to_be16(RDMAP_SEND_INVAL),
+	  .proc_data = siw_proc_send },
+	{ /* RDMAP_SEND_SE */
+	  .hdr_len = sizeof(struct iwarp_send),
+	  .ctrl.mpa_len = htons(sizeof(struct iwarp_send) - 2),
+	  .ctrl.ddp_rdmap_ctrl = DDP_FLAG_LAST | cpu_to_be16(DDP_VERSION << 8) |
+				 cpu_to_be16(RDMAP_VERSION << 6) |
+				 cpu_to_be16(RDMAP_SEND_SE),
+	  .proc_data = siw_proc_send },
+	{ /* RDMAP_SEND_SE_INVAL */
+	  .hdr_len = sizeof(struct iwarp_send_inv),
+	  .ctrl.mpa_len = htons(sizeof(struct iwarp_send_inv) - 2),
+	  .ctrl.ddp_rdmap_ctrl = DDP_FLAG_LAST | cpu_to_be16(DDP_VERSION << 8) |
+				 cpu_to_be16(RDMAP_VERSION << 6) |
+				 cpu_to_be16(RDMAP_SEND_SE_INVAL),
+	  .proc_data = siw_proc_send },
+	{ /* RDMAP_TERMINATE */
+	  .hdr_len = sizeof(struct iwarp_terminate),
+	  .ctrl.mpa_len = htons(sizeof(struct iwarp_terminate) - 2),
+	  .ctrl.ddp_rdmap_ctrl = DDP_FLAG_LAST | cpu_to_be16(DDP_VERSION << 8) |
+				 cpu_to_be16(RDMAP_VERSION << 6) |
+				 cpu_to_be16(RDMAP_TERMINATE),
+	  .proc_data = siw_proc_terminate }
+};
 
-#if LINUX_VERSION_CODE < KERNEL_VERSION(3, 15, 0)
-static void siw_qp_llp_data_ready(struct sock *sk, int flags)
-#else
-static void siw_qp_llp_data_ready(struct sock *sk)
-#endif
+void siw_qp_llp_data_ready(struct sock *sk)
 {
-	struct siw_qp		*qp;
+	struct siw_qp *qp;
 
 	read_lock(&sk->sk_callback_lock);
 
-	if (unlikely(!sk->sk_user_data || !sk_to_qp(sk))) {
-		dprint(DBG_ON, " No QP: %p\n", sk->sk_user_data);
+	if (unlikely(!sk->sk_user_data || !sk_to_qp(sk)))
 		goto done;
-	}
+
 	qp = sk_to_qp(sk);
 
 	if (likely(!qp->rx_ctx.rx_suspend &&
 		   down_read_trylock(&qp->state_lock))) {
-		read_descriptor_t rd_desc = {.arg.data = qp, .count = 1};
-
-		dprint(DBG_SK|DBG_RX, "(QP%d): "
-			"state (before tcp_read_sock)=%d\n",
-			QP_ID(qp), qp->attrs.state);
+		read_descriptor_t rd_desc = { .arg.data = qp, .count = 1 };
 
 		if (likely(qp->attrs.state == SIW_QP_STATE_RTS))
 			/*
@@ -183,44 +125,32 @@ static void siw_qp_llp_data_ready(struct sock *sk)
 			 */
 			tcp_read_sock(sk, &rd_desc, siw_tcp_rx_data);
 
-		dprint(DBG_SK|DBG_RX, "(QP%d): "
-			"state (after tcp_read_sock)=%d\n",
-			QP_ID(qp), qp->attrs.state);
-
 		up_read(&qp->state_lock);
 	} else {
-		dprint(DBG_SK|DBG_RX, "(QP%d): "
-			"Unable to RX: rx_suspend: %d\n",
-			QP_ID(qp), qp->rx_ctx.rx_suspend);
+		siw_dbg_qp(qp, "unable to rx, suspend: %d\n",
+			   qp->rx_ctx.rx_suspend);
 	}
 done:
 	read_unlock(&sk->sk_callback_lock);
 }
 
-
 void siw_qp_llp_close(struct siw_qp *qp)
 {
-	dprint(DBG_CM, "(QP%d): Enter: SIW QP state = %s, cep=0x%p\n",
-		QP_ID(qp), siw_qp_state_to_string[qp->attrs.state],
-		qp->cep);
+	siw_dbg_qp(qp, "enter llp close, state = %s\n",
+		   siw_qp_state_to_string[qp->attrs.state]);
 
 	down_write(&qp->state_lock);
 
-	dprint(DBG_CM, "(QP%d): state locked\n", QP_ID(qp));
-
 	qp->rx_ctx.rx_suspend = 1;
 	qp->tx_ctx.tx_suspend = 1;
-	qp->attrs.llp_stream_handle = NULL;
+	qp->attrs.sk = NULL;
 
 	switch (qp->attrs.state) {
-
 	case SIW_QP_STATE_RTS:
 	case SIW_QP_STATE_RTR:
 	case SIW_QP_STATE_IDLE:
 	case SIW_QP_STATE_TERMINATE:
-
 		qp->attrs.state = SIW_QP_STATE_ERROR;
-
 		break;
 	/*
 	 * SIW_QP_STATE_CLOSING:
@@ -229,23 +159,22 @@ void siw_qp_llp_close(struct siw_qp *qp)
 	 * ERROR or IDLE ?
 	 */
 	case SIW_QP_STATE_CLOSING:
-		if (tx_wqe(qp)->wr_status == SR_WR_IDLE)
+		if (tx_wqe(qp)->wr_status == SIW_WR_IDLE)
 			qp->attrs.state = SIW_QP_STATE_ERROR;
 		else
 			qp->attrs.state = SIW_QP_STATE_IDLE;
-
 		break;
 
 	default:
-		dprint(DBG_CM, " No state transition needed: %d\n",
-			qp->attrs.state);
+		siw_dbg_qp(qp, "llp close: no state transition needed: %s\n",
+			   siw_qp_state_to_string[qp->attrs.state]);
 		break;
 	}
 	siw_sq_flush(qp);
 	siw_rq_flush(qp);
 
 	/*
-	 * dereference closing CEP
+	 * Dereference closing CEP
 	 */
 	if (qp->cep) {
 		siw_cep_put(qp->cep);
@@ -253,58 +182,27 @@ void siw_qp_llp_close(struct siw_qp *qp)
 	}
 
 	up_write(&qp->state_lock);
-	dprint(DBG_CM, "(QP%d): Exit: SIW QP state = %s, cep=0x%p\n",
-		QP_ID(qp), siw_qp_state_to_string[qp->attrs.state],
-		qp->cep);
-}
 
+	siw_dbg_qp(qp, "llp close exit: state %s\n",
+		   siw_qp_state_to_string[qp->attrs.state]);
+}
 
 /*
  * socket callback routine informing about newly available send space.
  * Function schedules SQ work for processing SQ items.
  */
-static void siw_qp_llp_write_space(struct sock *sk)
+void siw_qp_llp_write_space(struct sock *sk)
 {
-	struct siw_qp	*qp = sk_to_qp(sk);
+	struct siw_cep *cep = sk_to_cep(sk);
 
-	/*
-	 * TODO:
-	 * Resemble sk_stream_write_space() logic for iWARP constraints:
-	 * Clear SOCK_NOSPACE only if sendspace may hold some reasonable
-	 * sized FPDU.
-	 */
-#ifdef SIW_TX_FULLSEGS
-	struct socket *sock = sk->sk_socket;
-	if (sk_stream_wspace(sk) >= (int)qp->tx_ctx.fpdu_len && sock) {
-		clear_bit(SOCK_NOSPACE, &sock->flags);
-		siw_sq_queue_work(qp);
-	}
-#else
-	sk_stream_write_space(sk);
+	cep->sk_write_space(sk);
 
 	if (!test_bit(SOCK_NOSPACE, &sk->sk_socket->flags))
-		siw_sq_queue_work(qp);
-#endif
+		(void)siw_sq_start(cep->qp);
 }
-
-static void siw_qp_socket_assoc(struct socket *s, struct siw_qp *qp)
-{
-	struct sock *sk = s->sk;
-
-	write_lock_bh(&sk->sk_callback_lock);
-
-	qp->attrs.llp_stream_handle = s;
-	s->sk->sk_data_ready = siw_qp_llp_data_ready;
-	s->sk->sk_write_space = siw_qp_llp_write_space;
-
-	write_unlock_bh(&sk->sk_callback_lock);
-}
-
 
 static int siw_qp_readq_init(struct siw_qp *qp, int irq_size, int orq_size)
 {
-	dprint(DBG_CM|DBG_WR, "(QP%d): %d %d\n", QP_ID(qp), irq_size, orq_size);
-
 	if (!irq_size)
 		irq_size = 1;
 	if (!orq_size)
@@ -313,38 +211,22 @@ static int siw_qp_readq_init(struct siw_qp *qp, int irq_size, int orq_size)
 	qp->attrs.irq_size = irq_size;
 	qp->attrs.orq_size = orq_size;
 
-	qp->irq = vmalloc(irq_size * sizeof(struct siw_sqe));
+	qp->irq = vzalloc(irq_size * sizeof(struct siw_sqe));
 	if (!qp->irq) {
-		dprint(DBG_ON, "(QP%d): Failed\n", QP_ID(qp));
+		siw_dbg_qp(qp, "irq malloc for %d failed\n", irq_size);
 		qp->attrs.irq_size = 0;
 		return -ENOMEM;
 	}
-	qp->orq = vmalloc(orq_size * sizeof(struct siw_sqe));
+	qp->orq = vzalloc(orq_size * sizeof(struct siw_sqe));
 	if (!qp->orq) {
-		dprint(DBG_ON, "(QP%d): Failed\n", QP_ID(qp));
+		siw_dbg_qp(qp, "orq malloc for %d failed\n", orq_size);
 		qp->attrs.orq_size = 0;
 		qp->attrs.irq_size = 0;
 		vfree(qp->irq);
 		return -ENOMEM;
 	}
-	memset(qp->irq, 0, irq_size * sizeof(struct siw_sqe));
-	memset(qp->orq, 0, orq_size * sizeof(struct siw_sqe));
-
 	return 0;
 }
-
-
-static void siw_send_terminate(struct siw_qp *qp)
-{
-	struct iwarp_terminate	pkt;
-
-	memset(&pkt, 0, sizeof pkt);
-	/*
-	 * TODO: send TERMINATE
-	 */
-	dprint(DBG_CM, "(QP%d): Todo\n", QP_ID(qp));
-}
-
 
 static int siw_qp_enable_crc(struct siw_qp *qp)
 {
@@ -352,114 +234,467 @@ static int siw_qp_enable_crc(struct siw_qp *qp)
 	struct siw_iwarp_tx *c_tx = &qp->tx_ctx;
 	int rv = 0;
 
-	c_tx->mpa_crc_hd.tfm = crypto_alloc_shash("crc32c", 0,
-						  CRYPTO_ALG_ASYNC);
-	if (IS_ERR(c_tx->mpa_crc_hd.tfm)) {
-		rv = -PTR_ERR(c_tx->mpa_crc_hd.tfm);
-		goto out;
+	if (siw_crypto_shash == NULL) {
+		rv = -ENOENT;
+		goto error;
 	}
-	c_rx->mpa_crc_hd.tfm = crypto_alloc_shash("crc32c", 0,
-						  CRYPTO_ALG_ASYNC);
-	if (IS_ERR(c_rx->mpa_crc_hd.tfm)) {
-		rv = -PTR_ERR(c_rx->mpa_crc_hd.tfm);
-		crypto_free_shash(c_tx->mpa_crc_hd.tfm);
+	c_tx->mpa_crc_hd =
+		kzalloc(sizeof(struct shash_desc) +
+				crypto_shash_descsize(siw_crypto_shash),
+			GFP_KERNEL);
+	c_rx->mpa_crc_hd =
+		kzalloc(sizeof(struct shash_desc) +
+				crypto_shash_descsize(siw_crypto_shash),
+			GFP_KERNEL);
+	if (!c_tx->mpa_crc_hd || !c_rx->mpa_crc_hd) {
+		rv = -ENOMEM;
+		goto error;
 	}
-out:
-	if (rv)
-		dprint(DBG_ON, "(QP%d): Failed loading crc32c: error=%d.",
-			QP_ID(qp), rv);
-	else
-		c_tx->crc_enabled = c_rx->crc_enabled = 1;
+	c_tx->mpa_crc_hd->tfm = siw_crypto_shash;
+	c_rx->mpa_crc_hd->tfm = siw_crypto_shash;
+
+	return 0;
+error:
+	siw_dbg_qp(qp, "falied loading crc32c. error %d\n", rv);
+
+	kfree(c_tx->mpa_crc_hd);
+	kfree(c_rx->mpa_crc_hd);
+
+	c_tx->mpa_crc_hd = c_rx->mpa_crc_hd = NULL;
 
 	return rv;
 }
 
+/*
+ * Send a non signalled READ or WRITE to peer side as negotiated
+ * with MPAv2 P2P setup protocol. The work request is only created
+ * as a current active WR and does not consume Send Queue space.
+ *
+ * Caller must hold QP state lock.
+ */
+int siw_qp_mpa_rts(struct siw_qp *qp, enum mpa_v2_ctrl ctrl)
+{
+	struct siw_wqe *wqe = tx_wqe(qp);
+	unsigned long flags;
+	int rv = 0;
+
+	spin_lock_irqsave(&qp->sq_lock, flags);
+
+	if (unlikely(wqe->wr_status != SIW_WR_IDLE)) {
+		spin_unlock_irqrestore(&qp->sq_lock, flags);
+		return -EIO;
+	}
+	memset(wqe->mem, 0, sizeof(*wqe->mem) * SIW_MAX_SGE);
+
+	wqe->wr_status = SIW_WR_QUEUED;
+	wqe->sqe.flags = 0;
+	wqe->sqe.num_sge = 1;
+	wqe->sqe.sge[0].length = 0;
+	wqe->sqe.sge[0].laddr = 0;
+	wqe->sqe.sge[0].lkey = 0;
+	/*
+	 * While it must not be checked for inbound zero length
+	 * READ/WRITE, some HW may treat STag 0 special.
+	 */
+	wqe->sqe.rkey = 1;
+	wqe->sqe.raddr = 0;
+	wqe->processed = 0;
+
+	if (ctrl & MPA_V2_RDMA_WRITE_RTR)
+		wqe->sqe.opcode = SIW_OP_WRITE;
+	else if (ctrl & MPA_V2_RDMA_READ_RTR) {
+		struct siw_sqe *rreq;
+
+		wqe->sqe.opcode = SIW_OP_READ;
+
+		spin_lock(&qp->orq_lock);
+
+		rreq = orq_get_free(qp);
+		if (rreq) {
+			siw_read_to_orq(rreq, &wqe->sqe);
+			qp->orq_put++;
+		} else
+			rv = -EIO;
+
+		spin_unlock(&qp->orq_lock);
+	} else
+		rv = -EINVAL;
+
+	if (rv)
+		wqe->wr_status = SIW_WR_IDLE;
+
+	spin_unlock_irqrestore(&qp->sq_lock, flags);
+
+	if (!rv)
+		rv = siw_sq_start(qp);
+
+	return rv;
+}
 
 /*
- * caller holds qp->state_lock
+ * Map memory access error to DDP tagged error
  */
-int
-siw_qp_modify(struct siw_qp *qp, struct siw_qp_attrs *attrs,
-	      enum siw_qp_attr_mask mask)
+enum ddp_ecode siw_tagged_error(enum siw_access_state state)
 {
-	int	drop_conn = 0, rv = 0;
+	if (state == E_STAG_INVALID)
+		return DDP_ECODE_T_INVALID_STAG;
+	if (state == E_BASE_BOUNDS)
+		return DDP_ECODE_T_BASE_BOUNDS;
+	if (state == E_PD_MISMATCH)
+		return DDP_ECODE_T_STAG_NOT_ASSOC;
+	if (state == E_ACCESS_PERM)
+		/*
+		 * RFC 5041 (DDP) lacks an ecode for insufficient access
+		 * permissions. 'Invalid STag' seem to be the closest
+		 * match though.
+		 */
+		return DDP_ECODE_T_INVALID_STAG;
+
+	WARN_ON(1);
+
+	return DDP_ECODE_T_INVALID_STAG;
+}
+
+/*
+ * Map memory access error to RDMAP protection error
+ */
+enum rdmap_ecode siw_rdmap_error(enum siw_access_state state)
+{
+	if (state == E_STAG_INVALID)
+		return RDMAP_ECODE_INVALID_STAG;
+	if (state == E_BASE_BOUNDS)
+		return RDMAP_ECODE_BASE_BOUNDS;
+	if (state == E_PD_MISMATCH)
+		return RDMAP_ECODE_STAG_NOT_ASSOC;
+	if (state == E_ACCESS_PERM)
+		return RDMAP_ECODE_ACCESS_RIGHTS;
+
+	return RDMAP_ECODE_UNSPECIFIED;
+}
+
+void siw_init_terminate(struct siw_qp *qp, enum term_elayer layer, u8 etype,
+			u8 ecode, int in_tx)
+{
+	if (!qp->term_info.valid) {
+		memset(&qp->term_info, 0, sizeof(qp->term_info));
+		qp->term_info.layer = layer;
+		qp->term_info.etype = etype;
+		qp->term_info.ecode = ecode;
+		qp->term_info.in_tx = in_tx;
+		qp->term_info.valid = 1;
+	}
+	siw_dbg_qp(qp, "init TERM: layer %d, type %d, code %d, in tx %s\n",
+		   layer, etype, ecode, in_tx ? "yes" : "no");
+}
+
+/*
+ * Send a TERMINATE message, as defined in RFC's 5040/5041/5044/6581.
+ * Sending TERMINATE messages is best effort - such messages
+ * can only be send if the QP is still connected and it does
+ * not have another outbound message in-progress, i.e. the
+ * TERMINATE message must not interfer with an incomplete current
+ * transmit operation.
+ */
+void siw_send_terminate(struct siw_qp *qp)
+{
+	struct kvec iov[3];
+	struct msghdr msg = { .msg_flags = MSG_DONTWAIT | MSG_EOR };
+	struct iwarp_terminate *term = NULL;
+	union iwarp_hdr *err_hdr = NULL;
+	struct socket *s = qp->attrs.sk;
+	struct siw_iwarp_rx *rx_ctx = &qp->rx_ctx;
+	union iwarp_hdr *rx_hdr = &rx_ctx->hdr;
+	u32 crc = 0;
+	int num_frags, len_terminate, rv;
+
+	if (!qp->term_info.valid)
+		return;
+
+	qp->term_info.valid = 0;
+
+	if (tx_wqe(qp)->wr_status == SIW_WR_INPROGRESS) {
+		siw_dbg_qp(qp, "cannot send TERMINATE: op %d in progress\n",
+			   tx_type(tx_wqe(qp)));
+		return;
+	}
+	if (!s && qp->cep)
+		/* QP not yet in RTS. Take socket from connection end point */
+		s = qp->cep->llp.sock;
+
+	if (!s) {
+		siw_dbg_qp(qp, "cannot send TERMINATE: not connected\n");
+		return;
+	}
+
+	term = kzalloc(sizeof(*term), GFP_KERNEL);
+	if (!term)
+		return;
+
+	term->ddp_qn = cpu_to_be32(RDMAP_UNTAGGED_QN_TERMINATE);
+	term->ddp_mo = 0;
+	term->ddp_msn = cpu_to_be32(1);
+
+	iov[0].iov_base = term;
+	iov[0].iov_len = sizeof(*term);
+
+	if ((qp->term_info.layer == TERM_ERROR_LAYER_DDP) ||
+	    ((qp->term_info.layer == TERM_ERROR_LAYER_RDMAP) &&
+	     (qp->term_info.etype != RDMAP_ETYPE_CATASTROPHIC))) {
+		err_hdr = kzalloc(sizeof(*err_hdr), GFP_KERNEL);
+		if (!err_hdr) {
+			kfree(term);
+			return;
+		}
+	}
+	memcpy(&term->ctrl, &iwarp_pktinfo[RDMAP_TERMINATE].ctrl,
+	       sizeof(struct iwarp_ctrl));
+
+	__rdmap_term_set_layer(term, qp->term_info.layer);
+	__rdmap_term_set_etype(term, qp->term_info.etype);
+	__rdmap_term_set_ecode(term, qp->term_info.ecode);
+
+	switch (qp->term_info.layer) {
+	case TERM_ERROR_LAYER_RDMAP:
+		if (qp->term_info.etype == RDMAP_ETYPE_CATASTROPHIC)
+			/* No additional DDP/RDMAP header to be included */
+			break;
+
+		if (qp->term_info.etype == RDMAP_ETYPE_REMOTE_PROTECTION) {
+			/*
+			 * Complete RDMAP frame will get attached, and
+			 * DDP segment length is valid
+			 */
+			term->flag_m = 1;
+			term->flag_d = 1;
+			term->flag_r = 1;
+
+			if (qp->term_info.in_tx) {
+				struct iwarp_rdma_rreq *rreq;
+				struct siw_wqe *wqe = tx_wqe(qp);
+
+				/* Inbound RREQ error, detected during
+				 * RRESP creation. Take state from
+				 * current TX work queue element to
+				 * reconstruct peers RREQ.
+				 */
+				rreq = (struct iwarp_rdma_rreq *)err_hdr;
+
+				memcpy(&rreq->ctrl,
+				       &iwarp_pktinfo[RDMAP_RDMA_READ_REQ].ctrl,
+				       sizeof(struct iwarp_ctrl));
+
+				rreq->rsvd = 0;
+				rreq->ddp_qn =
+					htonl(RDMAP_UNTAGGED_QN_RDMA_READ);
+
+				/* Provide RREQ's MSN as kept aside */
+				rreq->ddp_msn = htonl(wqe->sqe.sge[0].length);
+
+				rreq->ddp_mo = htonl(wqe->processed);
+				rreq->sink_stag = htonl(wqe->sqe.rkey);
+				rreq->sink_to = cpu_to_be64(wqe->sqe.raddr);
+				rreq->read_size = htonl(wqe->sqe.sge[0].length);
+				rreq->source_stag = htonl(wqe->sqe.sge[0].lkey);
+				rreq->source_to =
+					cpu_to_be64(wqe->sqe.sge[0].laddr);
+
+				iov[1].iov_base = rreq;
+				iov[1].iov_len = sizeof(*rreq);
+
+				rx_hdr = (union iwarp_hdr *)rreq;
+			} else {
+				/* Take RDMAP/DDP information from
+				 * current (failed) inbound frame.
+				 */
+				iov[1].iov_base = rx_hdr;
+
+				if (__rdmap_get_opcode(&rx_hdr->ctrl) ==
+				    RDMAP_RDMA_READ_REQ)
+					iov[1].iov_len =
+						sizeof(struct iwarp_rdma_rreq);
+				else /* SEND type */
+					iov[1].iov_len =
+						sizeof(struct iwarp_send);
+			}
+		} else {
+			/* Do not report DDP hdr information if packet
+			 * layout is unknown
+			 */
+			if ((qp->term_info.ecode == RDMAP_ECODE_VERSION) ||
+			    (qp->term_info.ecode == RDMAP_ECODE_OPCODE))
+				break;
+
+			iov[1].iov_base = rx_hdr;
+
+			/* Only DDP frame will get attached */
+			if (rx_hdr->ctrl.ddp_rdmap_ctrl & DDP_FLAG_TAGGED)
+				iov[1].iov_len =
+					sizeof(struct iwarp_rdma_write);
+			else
+				iov[1].iov_len = sizeof(struct iwarp_send);
+
+			term->flag_m = 1;
+			term->flag_d = 1;
+		}
+		term->ctrl.mpa_len = cpu_to_be16(iov[1].iov_len);
+		break;
+
+	case TERM_ERROR_LAYER_DDP:
+		/* Report error encountered while DDP processing.
+		 * This can only happen as a result of inbound
+		 * DDP processing
+		 */
+
+		/* Do not report DDP hdr information if packet
+		 * layout is unknown
+		 */
+		if (((qp->term_info.etype == DDP_ETYPE_TAGGED_BUF) &&
+		     (qp->term_info.ecode == DDP_ECODE_T_VERSION)) ||
+		    ((qp->term_info.etype == DDP_ETYPE_UNTAGGED_BUF) &&
+		     (qp->term_info.ecode == DDP_ECODE_UT_VERSION)))
+			break;
+
+		iov[1].iov_base = rx_hdr;
+
+		if (rx_hdr->ctrl.ddp_rdmap_ctrl & DDP_FLAG_TAGGED)
+			iov[1].iov_len = sizeof(struct iwarp_ctrl_tagged);
+		else
+			iov[1].iov_len = sizeof(struct iwarp_ctrl_untagged);
+
+		term->flag_m = 1;
+		term->flag_d = 1;
+		break;
+
+	default:
+		break;
+	}
+	if (term->flag_m || term->flag_d || term->flag_r) {
+		iov[2].iov_base = &crc;
+		iov[2].iov_len = sizeof(crc);
+		len_terminate = sizeof(*term) + iov[1].iov_len + MPA_CRC_SIZE;
+		num_frags = 3;
+	} else {
+		iov[1].iov_base = &crc;
+		iov[1].iov_len = sizeof(crc);
+		len_terminate = sizeof(*term) + MPA_CRC_SIZE;
+		num_frags = 2;
+	}
+
+	/* Adjust DDP Segment Length parameter, if valid */
+	if (term->flag_m) {
+		u32 real_ddp_len = be16_to_cpu(rx_hdr->ctrl.mpa_len);
+		enum rdma_opcode op = __rdmap_get_opcode(&rx_hdr->ctrl);
+
+		real_ddp_len -= iwarp_pktinfo[op].hdr_len - MPA_HDR_SIZE;
+		rx_hdr->ctrl.mpa_len = cpu_to_be16(real_ddp_len);
+	}
+
+	term->ctrl.mpa_len =
+		cpu_to_be16(len_terminate - (MPA_HDR_SIZE + MPA_CRC_SIZE));
+	if (qp->tx_ctx.mpa_crc_hd) {
+		crypto_shash_init(rx_ctx->mpa_crc_hd);
+		if (siw_crc_array(rx_ctx->mpa_crc_hd, (u8 *)iov[0].iov_base,
+				  iov[0].iov_len))
+			goto out;
+
+		if (num_frags == 3) {
+			if (siw_crc_array(rx_ctx->mpa_crc_hd,
+					  (u8 *)iov[1].iov_base,
+					  iov[1].iov_len))
+				goto out;
+		}
+		crypto_shash_final(rx_ctx->mpa_crc_hd, (u8 *)&crc);
+	}
+
+	rv = kernel_sendmsg(s, &msg, iov, num_frags, len_terminate);
+	siw_dbg_qp(qp, "sent TERM: %s, layer %d, type %d, code %d (%d bytes)\n",
+		   rv == len_terminate ? "success" : "failure",
+		   __rdmap_term_layer(term), __rdmap_term_etype(term),
+		   __rdmap_term_ecode(term), rv);
+out:
+	kfree(term);
+	kfree(err_hdr);
+}
+
+/*
+ * Handle all attrs other than state
+ */
+static void siw_qp_modify_nonstate(struct siw_qp *qp,
+				   struct siw_qp_attrs *attrs,
+				   enum siw_qp_attr_mask mask)
+{
+	if (mask & SIW_QP_ATTR_ACCESS_FLAGS) {
+		if (attrs->flags & SIW_RDMA_BIND_ENABLED)
+			qp->attrs.flags |= SIW_RDMA_BIND_ENABLED;
+		else
+			qp->attrs.flags &= ~SIW_RDMA_BIND_ENABLED;
+
+		if (attrs->flags & SIW_RDMA_WRITE_ENABLED)
+			qp->attrs.flags |= SIW_RDMA_WRITE_ENABLED;
+		else
+			qp->attrs.flags &= ~SIW_RDMA_WRITE_ENABLED;
+
+		if (attrs->flags & SIW_RDMA_READ_ENABLED)
+			qp->attrs.flags |= SIW_RDMA_READ_ENABLED;
+		else
+			qp->attrs.flags &= ~SIW_RDMA_READ_ENABLED;
+	}
+}
+
+/*
+ * Caller must hold qp->state_lock
+ */
+int siw_qp_modify(struct siw_qp *qp, struct siw_qp_attrs *attrs,
+		  enum siw_qp_attr_mask mask)
+{
+	int drop_conn = 0, rv = 0;
 
 	if (!mask)
 		return 0;
 
-	dprint(DBG_CM, "(QP%d)\n", QP_ID(qp));
+	siw_dbg_qp(qp, "state: %s => %s\n",
+		   siw_qp_state_to_string[qp->attrs.state],
+		   siw_qp_state_to_string[attrs->state]);
 
-	if (mask != SIW_QP_ATTR_STATE) {
-		/*
-		 * changes of qp attributes (maybe state, too)
-		 */
-		if (mask & SIW_QP_ATTR_ACCESS_FLAGS) {
+	if (mask != SIW_QP_ATTR_STATE)
+		siw_qp_modify_nonstate(qp, attrs, mask);
 
-			if (attrs->flags & SIW_RDMA_BIND_ENABLED)
-				qp->attrs.flags |= SIW_RDMA_BIND_ENABLED;
-			else
-				qp->attrs.flags &= ~SIW_RDMA_BIND_ENABLED;
-
-			if (attrs->flags & SIW_RDMA_WRITE_ENABLED)
-				qp->attrs.flags |= SIW_RDMA_WRITE_ENABLED;
-			else
-				qp->attrs.flags &= ~SIW_RDMA_WRITE_ENABLED;
-
-			if (attrs->flags & SIW_RDMA_READ_ENABLED)
-				qp->attrs.flags |= SIW_RDMA_READ_ENABLED;
-			else
-				qp->attrs.flags &= ~SIW_RDMA_READ_ENABLED;
-
-		}
-		/*
-		 * TODO: what else ??
-		 */
-	}
 	if (!(mask & SIW_QP_ATTR_STATE))
 		return 0;
 
-	dprint(DBG_CM, "(QP%d): SIW QP state: %s => %s\n", QP_ID(qp),
-		siw_qp_state_to_string[qp->attrs.state],
-		siw_qp_state_to_string[attrs->state]);
-
-
 	switch (qp->attrs.state) {
-
 	case SIW_QP_STATE_IDLE:
 	case SIW_QP_STATE_RTR:
-
 		switch (attrs->state) {
-
 		case SIW_QP_STATE_RTS:
 
-			if (attrs->mpa.crc) {
+			if (attrs->flags & SIW_MPA_CRC) {
 				rv = siw_qp_enable_crc(qp);
 				if (rv)
 					break;
 			}
 			if (!(mask & SIW_QP_ATTR_LLP_HANDLE)) {
-				dprint(DBG_ON, "(QP%d): socket?\n", QP_ID(qp));
+				siw_dbg_qp(qp, "no socket\n");
 				rv = -EINVAL;
 				break;
 			}
 			if (!(mask & SIW_QP_ATTR_MPA)) {
-				dprint(DBG_ON, "(QP%d): MPA?\n", QP_ID(qp));
+				siw_dbg_qp(qp, "no MPA\n");
 				rv = -EINVAL;
 				break;
 			}
-			dprint(DBG_CM, "(QP%d): Enter RTS: "
-				"peer 0x%08x, local 0x%08x\n", QP_ID(qp),
-				qp->cep->llp.raddr.sin_addr.s_addr,
-				qp->cep->llp.laddr.sin_addr.s_addr);
+			siw_dbg_qp(qp, "enter rts, peer 0x%08x, loc 0x%08x\n",
+				   qp->cep->llp.raddr.sin_addr.s_addr,
+				   qp->cep->llp.laddr.sin_addr.s_addr);
 			/*
-			 * Initialize global iWARP TX state
+			 * Initialize iWARP TX state
 			 */
 			qp->tx_ctx.ddp_msn[RDMAP_UNTAGGED_QN_SEND] = 0;
 			qp->tx_ctx.ddp_msn[RDMAP_UNTAGGED_QN_RDMA_READ] = 0;
 			qp->tx_ctx.ddp_msn[RDMAP_UNTAGGED_QN_TERMINATE] = 0;
 
 			/*
-			 * Initialize global iWARP RX state
+			 * Initialize iWARP RX state
 			 */
 			qp->rx_ctx.ddp_msn[RDMAP_UNTAGGED_QN_SEND] = 1;
 			qp->rx_ctx.ddp_msn[RDMAP_UNTAGGED_QN_RDMA_READ] = 1;
@@ -474,19 +709,8 @@ siw_qp_modify(struct siw_qp *qp, struct siw_qp_attrs *attrs,
 			if (rv)
 				break;
 
-			qp->attrs.mpa = attrs->mpa;
-			/*
-			 * move socket rx and tx under qp's control
-			 */
-			siw_qp_socket_assoc(attrs->llp_stream_handle, qp);
-
+			qp->attrs.sk = attrs->sk;
 			qp->attrs.state = SIW_QP_STATE_RTS;
-			/*
-			 * set initial mss
-			 */
-			qp->tx_ctx.tcp_seglen =
-				get_tcp_mss(attrs->llp_stream_handle->sk);
-
 			break;
 
 		case SIW_QP_STATE_ERROR:
@@ -503,18 +727,15 @@ siw_qp_modify(struct siw_qp *qp, struct siw_qp_attrs *attrs,
 			break;
 
 		default:
-			dprint(DBG_CM,
-				" QP state transition undefined: %s => %s\n",
-				siw_qp_state_to_string[qp->attrs.state],
-				siw_qp_state_to_string[attrs->state]);
+			siw_dbg_qp(qp, "state transition undefined: %s => %s\n",
+				   siw_qp_state_to_string[qp->attrs.state],
+				   siw_qp_state_to_string[attrs->state]);
 			break;
 		}
 		break;
 
 	case SIW_QP_STATE_RTS:
-
 		switch (attrs->state) {
-
 		case SIW_QP_STATE_CLOSING:
 			/*
 			 * Verbs: move to IDLE if SQ and ORQ are empty.
@@ -524,9 +745,9 @@ siw_qp_modify(struct siw_qp *qp, struct siw_qp_attrs *attrs,
 			 * and wait for the socket state change upcall to
 			 * come back closed.
 			 */
-			if (tx_wqe(qp)->wr_status == SR_WR_IDLE)
+			if (tx_wqe(qp)->wr_status == SIW_WR_IDLE) {
 				qp->attrs.state = SIW_QP_STATE_CLOSING;
-			else {
+			} else {
 				qp->attrs.state = SIW_QP_STATE_ERROR;
 				siw_sq_flush(qp);
 			}
@@ -537,9 +758,11 @@ siw_qp_modify(struct siw_qp *qp, struct siw_qp_attrs *attrs,
 
 		case SIW_QP_STATE_TERMINATE:
 			qp->attrs.state = SIW_QP_STATE_TERMINATE;
-			siw_send_terminate(qp);
-			drop_conn = 1;
 
+			siw_init_terminate(qp, TERM_ERROR_LAYER_RDMAP,
+					   RDMAP_ETYPE_CATASTROPHIC,
+					   RDMAP_ECODE_UNSPECIFIED, 1);
+			drop_conn = 1;
 			break;
 
 		case SIW_QP_STATE_ERROR:
@@ -560,47 +783,38 @@ siw_qp_modify(struct siw_qp *qp, struct siw_qp_attrs *attrs,
 			siw_rq_flush(qp);
 			qp->attrs.state = SIW_QP_STATE_ERROR;
 			drop_conn = 1;
-
 			break;
 
 		default:
-			dprint(DBG_ON,
-				" QP state transition undefined: %s => %s\n",
-				siw_qp_state_to_string[qp->attrs.state],
-				siw_qp_state_to_string[attrs->state]);
+			siw_dbg_qp(qp, "state transition undefined: %s => %s\n",
+				   siw_qp_state_to_string[qp->attrs.state],
+				   siw_qp_state_to_string[attrs->state]);
 			break;
 		}
 		break;
 
 	case SIW_QP_STATE_TERMINATE:
-
 		switch (attrs->state) {
-
 		case SIW_QP_STATE_ERROR:
 			siw_rq_flush(qp);
 			qp->attrs.state = SIW_QP_STATE_ERROR;
 
-			if (tx_wqe(qp)->wr_status != SR_WR_IDLE)
+			if (tx_wqe(qp)->wr_status != SIW_WR_IDLE)
 				siw_sq_flush(qp);
-
 			break;
 
 		default:
-			dprint(DBG_ON,
-				" QP state transition undefined: %s => %s\n",
-				siw_qp_state_to_string[qp->attrs.state],
-				siw_qp_state_to_string[attrs->state]);
+			siw_dbg_qp(qp, "state transition undefined: %s => %s\n",
+				   siw_qp_state_to_string[qp->attrs.state],
+				   siw_qp_state_to_string[attrs->state]);
 		}
 		break;
 
 	case SIW_QP_STATE_CLOSING:
-
 		switch (attrs->state) {
-
 		case SIW_QP_STATE_IDLE:
-			BUG_ON(tx_wqe(qp)->wr_status != SR_WR_IDLE);
+			WARN_ON(tx_wqe(qp)->wr_status != SIW_WR_IDLE);
 			qp->attrs.state = SIW_QP_STATE_IDLE;
-
 			break;
 
 		case SIW_QP_STATE_CLOSING:
@@ -617,24 +831,24 @@ siw_qp_modify(struct siw_qp *qp, struct siw_qp_attrs *attrs,
 			 */
 			qp->attrs.state = SIW_QP_STATE_ERROR;
 
-			if (tx_wqe(qp)->wr_status != SR_WR_IDLE)
+			if (tx_wqe(qp)->wr_status != SIW_WR_IDLE)
 				siw_sq_flush(qp);
 
 			siw_rq_flush(qp);
-
 			break;
 
 		default:
-			dprint(DBG_CM,
-				" QP state transition undefined: %s => %s\n",
-				siw_qp_state_to_string[qp->attrs.state],
-				siw_qp_state_to_string[attrs->state]);
+			siw_dbg_qp(qp, "state transition undefined: %s => %s\n",
+				   siw_qp_state_to_string[qp->attrs.state],
+				   siw_qp_state_to_string[attrs->state]);
+
 			return -ECONNABORTED;
 		}
 		break;
 
 	default:
-		dprint(DBG_CM, " NOP: State: %d\n", qp->attrs.state);
+		siw_dbg_qp(qp, " noop: state %s\n",
+			   siw_qp_state_to_string[qp->attrs.state]);
 		break;
 	}
 	if (drop_conn)
@@ -643,200 +857,105 @@ siw_qp_modify(struct siw_qp *qp, struct siw_qp_attrs *attrs,
 	return rv;
 }
 
-struct ib_qp *siw_get_ofaqp(struct ib_device *ofa_dev, int id)
+struct ib_qp *siw_get_base_qp(struct ib_device *base_dev, int id)
 {
-	struct siw_qp *qp =  siw_qp_id2obj(siw_dev_ofa2siw(ofa_dev), id);
+	struct siw_qp *qp = siw_qp_id2obj(to_siw_dev(base_dev), id);
 
-	dprint(DBG_OBJ, ": dev_name: %s, OFA QPID: %d, QP: %p\n",
-		ofa_dev->name, id, qp);
 	if (qp) {
 		/*
 		 * siw_qp_id2obj() increments object reference count
 		 */
 		siw_qp_put(qp);
-		dprint(DBG_OBJ, " QPID: %d\n", QP_ID(qp));
-		return &qp->ofa_qp;
+		siw_dbg_qp(qp, "got base QP");
+
+		return &qp->base_qp;
 	}
 	return (struct ib_qp *)NULL;
-}
-
-/*
- * siw_check_mem()
- *
- * Check protection domain, STAG state, access permissions and
- * address range for memory object.
- *
- * @pd:		Protection Domain memory should belong to
- * @mem:	memory to be checked
- * @addr:	starting addr of mem
- * @perms:	requested access permissions
- * @len:	len of memory interval to be checked
- *
- */
-int siw_check_mem(struct siw_pd *pd, struct siw_mem *mem, u64 addr,
-		  enum siw_access_flags perms, int len)
-{
-	if (siw_mem2mr(mem)->pd != pd) {
-		dprint(DBG_WR|DBG_ON, "(PD%d): PD mismatch %p : %p\n",
-			OBJ_ID(pd),
-			siw_mem2mr(mem)->pd, pd);
-
-		return -EINVAL;
-	}
-	if (mem->stag_state == STAG_INVALID) {
-		dprint(DBG_WR|DBG_ON, "(PD%d): STAG 0x%08x invalid\n",
-			OBJ_ID(pd), OBJ_ID(mem));
-		return -EPERM;
-	}
-	/*
-	 * check access permissions
-	 */
-	if ((mem->perms & perms) < perms) {
-		dprint(DBG_WR|DBG_ON, "(PD%d): "
-			"INSUFFICIENT permissions 0x%08x : 0x%08x\n",
-			OBJ_ID(pd), mem->perms, perms);
-		return -EPERM;
-	}
-	/*
-	 * Check address interval: we relax check to allow memory shrinked
-	 * from the start address _after_ placing or fetching len bytes.
-	 * TODO: this relaxation is probably overdone
-	 */
-	if (addr < mem->va || addr + len > mem->va + mem->len) {
-		dprint(DBG_WR|DBG_ON, "(PD%d): MEM interval len %d "
-			"[0x%016llx, 0x%016llx) out of bounds "
-			"[0x%016llx, 0x%016llx) for LKey=0x%08x\n",
-			OBJ_ID(pd), len, (unsigned long long)addr,
-			(unsigned long long)(addr + len),
-			(unsigned long long)mem->va,
-			(unsigned long long)(mem->va + mem->len),
-			OBJ_ID(mem));
-
-		return -EINVAL;
-	}
-	return 0;
-}
-
-/*
- * siw_check_sge()
- *
- * Check SGE for access rights in given interval
- *
- * @pd:		Protection Domain memory should belong to
- * @sge:	SGE to be checked
- * @mem:	resulting memory reference if successful
- * @perms:	requested access permissions
- * @off:	starting offset in SGE
- * @len:	len of memory interval to be checked
- *
- * NOTE: Function references SGE's memory object (mem->obj)
- * if not yet done. New reference is kept if check went ok and
- * released if check failed. If mem->obj is already valid, no new
- * lookup is being done and mem is not released it check fails.
- */
-int
-siw_check_sge(struct siw_pd *pd, struct siw_sge *sge,
-	      union siw_mem_resolved *mem, enum siw_access_flags perms,
-	      u32 off, int len)
-{
-	struct siw_dev	*sdev = pd->hdr.sdev;
-	int		new_ref = 0, rv = 0;
-
-	if (len + off > sge->length) {
-		rv = -EPERM;
-		goto fail;
-	}
-	if (mem->obj == NULL) {
-		mem->obj = siw_mem_id2obj(sdev, sge->lkey >> 8);
-		if (mem->obj == NULL) {
-			rv = -EINVAL;
-			goto fail;
-		}
-		new_ref = 1;
-	}
-
-	rv = siw_check_mem(pd, mem->obj, sge->laddr + off, perms, len);
-	if (rv)
-		goto fail;
-
-	return 0;
-
-fail:
-	if (new_ref) {
-		siw_mem_put(mem->obj);
-		mem->obj = NULL;
-	}
-	return rv;
 }
 
 void siw_read_to_orq(struct siw_sqe *rreq, struct siw_sqe *sqe)
 {
 	rreq->id = sqe->id;
-	rreq->opcode = SIW_OP_READ;
+	rreq->opcode = sqe->opcode;
 	rreq->sge[0].laddr = sqe->sge[0].laddr;
 	rreq->sge[0].length = sqe->sge[0].length;
 	rreq->sge[0].lkey = sqe->sge[0].lkey;
+	rreq->sge[1].lkey = sqe->sge[1].lkey;
 	rreq->flags = sqe->flags | SIW_WQE_VALID;
 	rreq->num_sge = 1;
 }
 
-
 /*
- * Must be called with SQ locked
+ * Must be called with SQ locked.
+ * To avoid complete SQ starvation by constant inbound READ requests,
+ * the active IRQ will not be served after qp->irq_burst, if the
+ * SQ has pending work.
  */
 int siw_activate_tx(struct siw_qp *qp)
 {
-	struct siw_sqe	*sqe;
-	struct siw_wqe	*wqe = tx_wqe(qp);
+	struct siw_sqe *irqe, *sqe;
+	struct siw_wqe *wqe = tx_wqe(qp);
 	int rv = 1;
 
-	if (unlikely(wqe->wr_status != SR_WR_IDLE)) {
-		WARN_ON(1);
-		return -1;
-	}
-	/*
-	 * This codes prefers pending READ Responses over SQ processing
-	 */
-	sqe = &qp->irq[qp->irq_get % qp->attrs.irq_size];
+	irqe = &qp->irq[qp->irq_get % qp->attrs.irq_size];
 
-	if (sqe->flags & SIW_WQE_VALID) {
-		memset(wqe->mem, 0, sizeof *wqe->mem * SIW_MAX_SGE);
-		wqe->wr_status = SR_WR_QUEUED;
+	if (irqe->flags & SIW_WQE_VALID) {
+		sqe = sq_get_next(qp);
+
+		/*
+		 * Avoid local WQE processing starvation in case
+		 * of constant inbound READ request stream
+		 */
+		if (sqe && ++qp->irq_burst >= SIW_IRQ_MAXBURST_SQ_ACTIVE) {
+			qp->irq_burst = 0;
+			goto skip_irq;
+		}
+		memset(wqe->mem, 0, sizeof(*wqe->mem) * SIW_MAX_SGE);
+		wqe->wr_status = SIW_WR_QUEUED;
 
 		/* start READ RESPONSE */
 		wqe->sqe.opcode = SIW_OP_READ_RESPONSE;
 		wqe->sqe.flags = 0;
-		wqe->sqe.num_sge = 1;
-		wqe->sqe.sge[0].length = sqe->sge[0].length;
-		wqe->sqe.sge[0].laddr = sqe->sge[0].laddr;
-		wqe->sqe.sge[0].lkey = sqe->sge[0].lkey;
-		wqe->sqe.rkey = sqe->rkey;
-		wqe->sqe.raddr = sqe->raddr;
+		if (irqe->num_sge) {
+			wqe->sqe.num_sge = 1;
+			wqe->sqe.sge[0].length = irqe->sge[0].length;
+			wqe->sqe.sge[0].laddr = irqe->sge[0].laddr;
+			wqe->sqe.sge[0].lkey = irqe->sge[0].lkey;
+		} else {
+			wqe->sqe.num_sge = 0;
+		}
+
+		/* Retain original RREQ's message sequence number for
+		 * potential error reporting cases.
+		 */
+		wqe->sqe.sge[1].length = irqe->sge[1].length;
+
+		wqe->sqe.rkey = irqe->rkey;
+		wqe->sqe.raddr = irqe->raddr;
 
 		wqe->processed = 0;
 		qp->irq_get++;
-		smp_store_mb(sqe->flags, 0);
+
+		/* mark current IRQ entry free */
+		smp_store_mb(irqe->flags, 0);
 
 		goto out;
-	} 
-
+	}
 	sqe = sq_get_next(qp);
 	if (sqe) {
-		unsigned long flags;
-
-		memset(wqe->mem, 0, sizeof *wqe->mem * SIW_MAX_SGE);
-		wqe->wr_status = SR_WR_QUEUED;
+skip_irq:
+		memset(wqe->mem, 0, sizeof(*wqe->mem) * SIW_MAX_SGE);
+		wqe->wr_status = SIW_WR_QUEUED;
 
 		/* First copy SQE to kernel private memory */
-		memcpy(&wqe->sqe, sqe, sizeof *sqe);
+		memcpy(&wqe->sqe, sqe, sizeof(*sqe));
 
-		if (wqe->sqe.opcode > SIW_OP_SEND) {
+		if (wqe->sqe.opcode >= SIW_NUM_OPCODES) {
 			rv = -EINVAL;
 			goto out;
 		}
-
 		if (wqe->sqe.flags & SIW_WQE_INLINE) {
-			if (wqe->sqe.opcode != SIW_OP_SEND && 
+			if (wqe->sqe.opcode != SIW_OP_SEND &&
 			    wqe->sqe.opcode != SIW_OP_WRITE) {
 				rv = -EINVAL;
 				goto out;
@@ -849,30 +968,30 @@ int siw_activate_tx(struct siw_qp *qp)
 			wqe->sqe.sge[0].lkey = 0;
 			wqe->sqe.num_sge = 1;
 		}
-		
 		if (wqe->sqe.flags & SIW_WQE_READ_FENCE) {
-			/* Only WRITE and SEND can be READ fenced */
-			if (unlikely(wqe->sqe.opcode != SIW_OP_WRITE &&
-				     wqe->sqe.opcode != SIW_OP_SEND)) {
-				pr_info("QP[%d]: cannot fence %d\n",
-					QP_ID(qp), wqe->sqe.opcode);
+			/* A READ cannot be fenced */
+			if (unlikely(wqe->sqe.opcode == SIW_OP_READ ||
+				     wqe->sqe.opcode ==
+					     SIW_OP_READ_LOCAL_INV)) {
+				siw_dbg_qp(qp, "cannot fence read\n");
 				rv = -EINVAL;
 				goto out;
 			}
-			lock_orq_rxsave(qp, flags);
+			spin_lock(&qp->orq_lock);
 
 			if (!siw_orq_empty(qp)) {
 				qp->tx_ctx.orq_fence = 1;
 				rv = 0;
 			}
-			unlock_orq_rxsave(qp, flags);
+			spin_unlock(&qp->orq_lock);
 
-		} else if (wqe->sqe.opcode == SIW_OP_READ) {
-			struct siw_sqe	*rreq;
+		} else if (wqe->sqe.opcode == SIW_OP_READ ||
+			   wqe->sqe.opcode == SIW_OP_READ_LOCAL_INV) {
+			struct siw_sqe *rreq;
 
 			wqe->sqe.num_sge = 1;
 
-			lock_orq_rxsave(qp, flags);
+			spin_lock(&qp->orq_lock);
 
 			rreq = orq_get_free(qp);
 			if (rreq) {
@@ -886,122 +1005,129 @@ int siw_activate_tx(struct siw_qp *qp)
 				qp->tx_ctx.orq_fence = 1;
 				rv = 0;
 			}
-			unlock_orq_rxsave(qp, flags);
+			spin_unlock(&qp->orq_lock);
 		}
 
 		/* Clear SQE, can be re-used by application */
 		smp_store_mb(sqe->flags, 0);
 		qp->sq_get++;
-	} else
+	} else {
 		rv = 0;
-	
+	}
 out:
 	if (unlikely(rv < 0)) {
-		pr_warn("QP[%d]: error %d in activate_tx\n", QP_ID(qp), rv);
-		wqe->wr_status = SR_WR_IDLE;
+		siw_dbg_qp(qp, "error %d\n", rv);
+		wqe->wr_status = SIW_WR_IDLE;
 	}
 	return rv;
 }
 
-int siw_crc_array(struct shash_desc *desc, u8 *start, size_t len)
+/*
+ * Check if current CQ state qualifies for calling CQ completion
+ * handler. Must be called with CQ lock held.
+ */
+static bool siw_cq_notify_now(struct siw_cq *cq, u32 flags)
 {
-	return crypto_shash_update(desc, start, len);
-}
+	u64 cq_notify;
 
-int siw_crc_page(struct shash_desc *desc, struct page *p, int off, int len)
-{
-	int rv;
-	struct scatterlist t_sg;
+	if (!cq->base_cq.comp_handler)
+		return false;
 
-	sg_init_table(&t_sg, 1);
-	sg_set_page(&t_sg, p, len, off);
-	rv = crypto_shash_update(desc, sg_virt(&t_sg), len);
+	cq_notify = READ_ONCE(*cq->notify);
 
-	return rv;
-}
-
-static void siw_cq_notify(struct siw_cq *cq, u32 flags)
-{
-	u32 cq_notify;
-
-	if (unlikely(!cq->ofa_cq.comp_handler))
-		return;
-
-	cq_notify = _load_shared(*cq->notify);
-
-	if ((cq_notify & SIW_NOTIFY_NEXT_COMPLETION) || 
+	if ((cq_notify & SIW_NOTIFY_NEXT_COMPLETION) ||
 	    ((cq_notify & SIW_NOTIFY_SOLICITED) &&
 	     (flags & SIW_WQE_SOLICITED))) {
+		/* dis-arm CQ */
 		smp_store_mb(*cq->notify, SIW_NOTIFY_NOT);
-		(*cq->ofa_cq.comp_handler)(&cq->ofa_cq, cq->ofa_cq.cq_context);
+
+		return true;
 	}
+	return false;
+}
+
+/* Must be called without holding CQ lock */
+static inline void siw_cq_completion(struct siw_cq *cq)
+{
+	siw_dbg_cq(cq, "Call completion handler\n");
+	cq->base_cq.comp_handler(&cq->base_cq, cq->base_cq.cq_context);
 }
 
 int siw_sqe_complete(struct siw_qp *qp, struct siw_sqe *sqe, u32 bytes,
 		     enum siw_wc_status status)
 {
 	struct siw_cq *cq = qp->scq;
-	struct siw_cqe *cqe;
-	unsigned long flags;
-	u32 idx;
 	int rv = 0;
 
 	if (cq) {
 		u32 sqe_flags = sqe->flags;
+		struct siw_cqe *cqe;
+		u32 idx;
+		unsigned long flags;
 
-		lock_cq_rxsave(cq, flags);
+		spin_lock_irqsave(&cq->lock, flags);
 
 		idx = cq->cq_put % cq->num_cqe;
 		cqe = &cq->queue[idx];
 
-		if (!cqe->flags) {
+		if (!READ_ONCE(cqe->flags)) {
+			bool notify;
+
 			cqe->id = sqe->id;
 			cqe->opcode = sqe->opcode;
 			cqe->status = status;
 			cqe->imm_data = 0;
 			cqe->bytes = bytes;
 
-			if (cq->kernel_verbs) {
-				siw_qp_get(qp);
-				cqe->qp = qp;
-			} else
-				cqe->qp_id = QP_ID(qp);
+			if (cq->kernel_verbs)
+				cqe->base_qp = &qp->base_qp;
+			else
+				cqe->qp_id = qp->id;
 
-			smp_store_mb(cqe->flags, SIW_WQE_VALID);
+			/* mark CQE valid for application */
+			WRITE_ONCE(cqe->flags, SIW_WQE_VALID);
+			/* recycle SQE */
 			smp_store_mb(sqe->flags, 0);
 
 			cq->cq_put++;
-			unlock_cq_rxsave(cq, flags);
-			siw_cq_notify(cq, sqe_flags);
+			notify = siw_cq_notify_now(cq, sqe_flags);
+
+			spin_unlock_irqrestore(&cq->lock, flags);
+
+			if (notify)
+				siw_cq_completion(cq);
 		} else {
-			unlock_cq_rxsave(cq, flags);
+			spin_unlock_irqrestore(&cq->lock, flags);
 			rv = -ENOMEM;
 			siw_cq_event(cq, IB_EVENT_CQ_ERR);
 		}
-	} else
+	} else {
+		/* recycle SQE */
 		smp_store_mb(sqe->flags, 0);
-
+	}
 	return rv;
 }
 
 int siw_rqe_complete(struct siw_qp *qp, struct siw_rqe *rqe, u32 bytes,
-		     enum siw_wc_status status)
+		     u32 inval_stag, enum siw_wc_status status)
 {
 	struct siw_cq *cq = qp->rcq;
-	struct siw_cqe *cqe;
-	unsigned long flags;
-	u32 idx;
 	int rv = 0;
 
 	if (cq) {
-		u32 rqe_flags = rqe->flags;
+		struct siw_cqe *cqe;
+		u32 idx;
+		unsigned long flags;
 
-		lock_cq_rxsave(cq, flags);
+		spin_lock_irqsave(&cq->lock, flags);
 
 		idx = cq->cq_put % cq->num_cqe;
 		cqe = &cq->queue[idx];
 
-		if (!cqe->flags) {
+		if (!READ_ONCE(cqe->flags)) {
+			bool notify;
+			u8 cqe_flags = SIW_WQE_VALID;
+
 			cqe->id = rqe->id;
 			cqe->opcode = SIW_OP_RECEIVE;
 			cqe->status = status;
@@ -1009,25 +1135,35 @@ int siw_rqe_complete(struct siw_qp *qp, struct siw_rqe *rqe, u32 bytes,
 			cqe->bytes = bytes;
 
 			if (cq->kernel_verbs) {
-				siw_qp_get(qp);
-				cqe->qp = qp;
-			} else
-				cqe->qp_id = QP_ID(qp);
-
-			smp_store_mb(cqe->flags, SIW_WQE_VALID);
+				cqe->base_qp = &qp->base_qp;
+				if (inval_stag) {
+					cqe_flags |= SIW_WQE_REM_INVAL;
+					cqe->inval_stag = inval_stag;
+				}
+			} else {
+				cqe->qp_id = qp->id;
+			}
+			/* mark CQE valid for application */
+			WRITE_ONCE(cqe->flags, cqe_flags);
+			/* recycle RQE */
 			smp_store_mb(rqe->flags, 0);
 
 			cq->cq_put++;
-			unlock_cq_rxsave(cq, flags);
-			siw_cq_notify(cq, rqe_flags);
+			notify = siw_cq_notify_now(cq, SIW_WQE_SIGNALLED);
+
+			spin_unlock_irqrestore(&cq->lock, flags);
+
+			if (notify)
+				siw_cq_completion(cq);
 		} else {
-			unlock_cq_rxsave(cq, flags);
+			spin_unlock_irqrestore(&cq->lock, flags);
 			rv = -ENOMEM;
 			siw_cq_event(cq, IB_EVENT_CQ_ERR);
 		}
-	} else
+	} else {
+		/* recycle RQE */
 		smp_store_mb(rqe->flags, 0);
-
+	}
 	return rv;
 }
 
@@ -1035,81 +1171,71 @@ int siw_rqe_complete(struct siw_qp *qp, struct siw_rqe *rqe, u32 bytes,
  * siw_sq_flush()
  *
  * Flush SQ and ORRQ entries to CQ.
- * IRRQ entries are silently dropped.
  *
- * TODO: Add termination code for in-progress WQE.
- * TODO: an in-progress WQE may have been partially
- *       processed. It should be enforced, that transmission
- *       of a started DDP segment must be completed if possible
- *       by any chance.
- *
- * Must be called with qp state write lock held.
+ * Must be called with QP state write lock held.
  * Therefore, SQ and ORQ lock must not be taken.
  */
 void siw_sq_flush(struct siw_qp *qp)
 {
-	struct siw_sqe	*sqe;
-	struct siw_wqe	*wqe = tx_wqe(qp);
-	unsigned long	flags;
-	int		async_event = 0;
+	struct siw_sqe *sqe;
+	struct siw_wqe *wqe = tx_wqe(qp);
+	int async_event = 0;
 
-	dprint(DBG_OBJ|DBG_CM|DBG_WR, "(QP%d): Enter\n", QP_ID(qp));
+	siw_dbg_qp(qp, "enter\n");
+
 	/*
 	 * Start with completing any work currently on the ORQ
 	 */
-	lock_orq_rxsave(qp, flags);
-
 	while (qp->attrs.orq_size) {
 		sqe = &qp->orq[qp->orq_get % qp->attrs.orq_size];
-		if (!sqe->flags)
+		if (!READ_ONCE(sqe->flags))
 			break;
 
-		if (siw_sqe_complete(qp, sqe, 0,
-				     SIW_WC_WR_FLUSH_ERR) != 0)
+		if (siw_sqe_complete(qp, sqe, 0, SIW_WC_WR_FLUSH_ERR) != 0)
 			break;
 
+		WRITE_ONCE(sqe->flags, 0);
 		qp->orq_get++;
 	}
-	unlock_orq_rxsave(qp, flags);
 	/*
-	 * Flush the in-progress wqe, if there.
+	 * Flush an in-progess WQE if present
 	 */
-	if (wqe->wr_status != SR_WR_IDLE) {
-		/*
-		 * TODO: Add iWARP Termination code
-		 */
-		dprint(DBG_WR,
-			" (QP%d): Flush current WQE %p, type %d, status %d\n",
-			QP_ID(qp), wqe, tx_type(wqe), wqe->wr_status);
+	if (wqe->wr_status != SIW_WR_IDLE) {
+		siw_dbg_qp(qp, "flush current SQE, type %d, status %d\n",
+			   tx_type(wqe), wqe->wr_status);
 
-		siw_wqe_put_mem(wqe, wqe->sqe.opcode);
+		siw_wqe_put_mem(wqe, tx_type(wqe));
 
-		if (wqe->sqe.opcode != SIW_OP_READ_RESPONSE &&
-		    (wqe->sqe.opcode != SIW_OP_READ ||
-		     wqe->wr_status == SR_WR_QUEUED))
+		if (tx_type(wqe) != SIW_OP_READ_RESPONSE &&
+		    ((tx_type(wqe) != SIW_OP_READ &&
+		      tx_type(wqe) != SIW_OP_READ_LOCAL_INV) ||
+		     wqe->wr_status == SIW_WR_QUEUED))
 			/*
-			 * An in-progress RREQUEST is already in
+			 * An in-progress Read Request is already in
 			 * the ORQ
 			 */
 			siw_sqe_complete(qp, &wqe->sqe, wqe->bytes,
 					 SIW_WC_WR_FLUSH_ERR);
 
-		wqe->wr_status = SR_WR_IDLE;
+		wqe->wr_status = SIW_WR_IDLE;
 	}
 	/*
 	 * Flush the Send Queue
 	 */
 	while (qp->attrs.sq_size) {
 		sqe = &qp->sendq[qp->sq_get % qp->attrs.sq_size];
-		if (!sqe->flags)
+		if (!READ_ONCE(sqe->flags))
 			break;
 
 		async_event = 1;
 		if (siw_sqe_complete(qp, sqe, 0, SIW_WC_WR_FLUSH_ERR) != 0)
-			/* Shall IB_EVENT_SQ_DRAINED be supressed ? */
+			/*
+			 * Shall IB_EVENT_SQ_DRAINED be supressed if work
+			 * completion fails?
+			 */
 			break;
 
-		sqe->flags = 0;
+		WRITE_ONCE(sqe->flags, 0);
 		qp->sq_get++;
 	}
 	if (async_event)
@@ -1119,43 +1245,110 @@ void siw_sq_flush(struct siw_qp *qp)
 /*
  * siw_rq_flush()
  *
- * Flush recv queue entries to cq. An in-progress WQE may have some bytes
- * processed (wqe->processed).
+ * Flush recv queue entries to CQ.
  *
- * Must be called with qp state write lock held.
+ * Must be called with QP state write lock held.
  * Therefore, RQ lock must not be taken.
  */
 void siw_rq_flush(struct siw_qp *qp)
 {
-	struct siw_wqe		*wqe = rx_wqe(qp);
+	struct siw_wqe *wqe = rx_wqe(qp);
 
-	dprint(DBG_OBJ|DBG_CM|DBG_WR, "(QP%d): Enter\n", QP_ID(qp));
+	siw_dbg_qp(qp, "enter\n");
 
 	/*
 	 * Flush an in-progess WQE if present
 	 */
-	if (wqe->wr_status != SR_WR_IDLE) {
-		if (__rdmap_opcode(&qp->rx_ctx.hdr.ctrl) != RDMAP_RDMA_WRITE) {
-			siw_wqe_put_mem(wqe, SIW_OP_RECEIVE);
+	if (wqe->wr_status != SIW_WR_IDLE) {
+		siw_dbg_qp(qp, "flush current rqe, type %d, status %d\n",
+			   rx_type(wqe), wqe->wr_status);
+
+		siw_wqe_put_mem(wqe, rx_type(wqe));
+
+		if (rx_type(wqe) == SIW_OP_RECEIVE) {
 			siw_rqe_complete(qp, &wqe->rqe, wqe->bytes,
-					 SIW_WC_WR_FLUSH_ERR);
-		} else
-			siw_mem_put(rx_mem(qp));
-
-		wqe->wr_status = SR_WR_IDLE;
+					 0, SIW_WC_WR_FLUSH_ERR);
+		} else if (rx_type(wqe) != SIW_OP_READ &&
+			   rx_type(wqe) != SIW_OP_READ_RESPONSE &&
+			   rx_type(wqe) != SIW_OP_WRITE) {
+			siw_sqe_complete(qp, &wqe->sqe, 0, SIW_WC_WR_FLUSH_ERR);
+		}
+		wqe->wr_status = SIW_WR_IDLE;
 	}
-
-	while (qp->recvq && qp->attrs.rq_size) {
+	/*
+	 * Flush the Receive Queue
+	 */
+	while (qp->attrs.rq_size) {
 		struct siw_rqe *rqe =
 			&qp->recvq[qp->rq_get % qp->attrs.rq_size];
 
-		if (!rqe->flags)
+		if (!READ_ONCE(rqe->flags))
 			break;
 
-		if (siw_rqe_complete(qp, rqe, 0, SIW_WC_WR_FLUSH_ERR) != 0)
+		if (siw_rqe_complete(qp, rqe, 0, 0, SIW_WC_WR_FLUSH_ERR) != 0)
 			break;
-		rqe->flags = 0;
 
+		WRITE_ONCE(rqe->flags, 0);
 		qp->rq_get++;
 	}
+}
+
+int siw_qp_add(struct siw_device *sdev, struct siw_qp *qp)
+{
+	unsigned long flags;
+	int id, min_id;
+
+	get_random_bytes(&min_id, 4);
+	min_id &= 0x00FFFFFF;
+again:
+	spin_lock_irqsave(&sdev->lock, flags);
+	id = idr_alloc(&sdev->qp_idr, qp, min_id, 0x00FFFFFF - 1, GFP_KERNEL);
+	spin_unlock_irqrestore(&sdev->lock, flags);
+
+	if (id > 0) {
+		kref_init(&qp->ref);
+		qp->id = id;
+		qp->sdev = sdev;
+
+		siw_dbg_qp(qp, "new QP\n");
+		return 0;
+	} else if (id == -ENOSPC && min_id != 1) {
+		min_id = 1;
+		goto again;
+	} else {
+		pr_warn("siw: QP ID space\n");
+	}
+	return id == 0 ? -ENOSPC : id;
+}
+
+void siw_free_qp(struct kref *ref)
+{
+	struct siw_qp *found, *qp = container_of(ref, struct siw_qp, ref);
+	struct siw_device *sdev = qp->sdev;
+	unsigned long flags;
+
+	siw_dbg_qp(qp, "free QP\n");
+
+	if (qp->cep)
+		siw_cep_put(qp->cep);
+
+	spin_lock_irqsave(&sdev->lock, flags);
+	found = idr_remove(&sdev->qp_idr, qp->id);
+	WARN_ON(found != qp);
+	list_del(&qp->devq);
+	spin_unlock_irqrestore(&sdev->lock, flags);
+
+	if (qp->sendq)
+		vfree(qp->sendq);
+	if (qp->recvq)
+		vfree(qp->recvq);
+	if (qp->irq)
+		vfree(qp->irq);
+	if (qp->orq)
+		vfree(qp->orq);
+
+	siw_put_tx_cpu(qp->tx_cpu);
+
+	atomic_dec(&sdev->num_qp);
+	kfree(qp);
 }

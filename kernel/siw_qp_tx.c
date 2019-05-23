@@ -1,40 +1,7 @@
-/*
- * Software iWARP device driver for Linux
- *
- * Authors: Bernard Metzler <bmt@zurich.ibm.com>
- *
- * Copyright (c) 2008-2016, IBM Corporation
- *
- * This software is available to you under a choice of one of two
- * licenses.  You may choose to be licensed under the terms of the GNU
- * General Public License (GPL) Version 2, available from the file
- * COPYING in the main directory of this source tree, or the
- * BSD license below:
- *
- *   Redistribution and use in source and binary forms, with or
- *   without modification, are permitted provided that the following
- *   conditions are met:
- *
- *   - Redistributions of source code must retain the above copyright notice,
- *     this list of conditions and the following disclaimer.
- *
- *   - Redistributions in binary form must reproduce the above copyright
- *     notice, this list of conditions and the following disclaimer in the
- *     documentation and/or other materials provided with the distribution.
- *
- *   - Neither the name of IBM nor the names of its contributors may be
- *     used to endorse or promote products derived from this software without
- *     specific prior written permission.
- *
- * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND,
- * EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
- * MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND
- * NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS
- * BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN
- * ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN
- * CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
- * SOFTWARE.
- */
+// SPDX-License-Identifier: GPL-2.0 or BSD-3-Clause
+
+/* Authors: Bernard Metzler <bmt@zurich.ibm.com> */
+/* Copyright (c) 2008-2019, IBM Corporation */
 
 #include <linux/errno.h>
 #include <linux/types.h>
@@ -53,109 +20,102 @@
 #include <rdma/ib_user_verbs.h>
 
 #include "siw.h"
-#include "siw_obj.h"
 #include "siw_cm.h"
+#include "siw_verbs.h"
+#include "siw_mem.h"
+#include "siw_debug.h"
 
-#ifdef USE_SQ_KTHREAD
 #include <linux/kthread.h>
 
-extern struct task_struct *qp_tx_thread[];
-extern int default_tx_cpu;
-#endif
-
-static bool zcopy_tx = 1;
-module_param(zcopy_tx, bool, 0644);
-MODULE_PARM_DESC(zcopy_tx, "Zero copy user data transmit if possible");
-
-static bool low_delay_tx = 1;
-module_param(low_delay_tx, bool, 0644);
-MODULE_PARM_DESC(low_delay_tx, "Run tight transmit thread loop if activated\n");
-
-static inline int siw_crc_txhdr(struct siw_iwarp_tx *ctx)
+static int siw_crc_txhdr(struct siw_iwarp_tx *ctx)
 {
-	crypto_shash_init(&ctx->mpa_crc_hd);
-	return siw_crc_array(&ctx->mpa_crc_hd, (u8 *)&ctx->pkt,
-			     ctx->ctrl_len);
+	crypto_shash_init(ctx->mpa_crc_hd);
+	return siw_crc_array(ctx->mpa_crc_hd, (u8 *)&ctx->pkt, ctx->ctrl_len);
 }
 
 #define MAX_HDR_INLINE					\
 	(((uint32_t)(sizeof(struct siw_rreq_pkt) -	\
-	sizeof(struct iwarp_send))) & 0xF8)
+		     sizeof(struct iwarp_send))) & 0xF8)
+
+static struct page *siw_get_pblpage(struct siw_mr *mr, u64 addr, int *idx)
+{
+	struct siw_pbl *pbl = mr->pbl;
+	u64 offset = addr - mr->mem.va;
+	u64 paddr = siw_pbl_get_buffer(pbl, offset, NULL, idx);
+
+	if (paddr)
+		return virt_to_page(paddr);
+
+	return NULL;
+}
 
 /*
- * Copy short payload at provided destination address and
- * update address pointer to the address behind data
- * including potential padding
+ * Copy short payload at provided destination payload address
  */
-static int siw_try_1seg(struct siw_iwarp_tx *c_tx, char *payload)
+static int siw_try_1seg(struct siw_iwarp_tx *c_tx, u64 paddr)
 {
 	struct siw_wqe *wqe = &c_tx->wqe_active;
 	struct siw_sge *sge = &wqe->sqe.sge[0];
 	u32 bytes = sge->length;
 
 	if (bytes > MAX_HDR_INLINE || wqe->sqe.num_sge != 1)
-		return -1;
+		return MAX_HDR_INLINE + 1;
 
-	if (bytes == 0)
+	if (!bytes)
 		return 0;
 
-	if (tx_flags(wqe) & SIW_WQE_INLINE)
-		memcpy(payload, &wqe->sqe.sge[1], bytes);
-	else {
-		struct siw_mr *mr = siw_mem2mr(wqe->mem[0].obj);
+	if (tx_flags(wqe) & SIW_WQE_INLINE) {
+		memcpy((void *)paddr, &wqe->sqe.sge[1], bytes);
+	} else {
+		struct siw_mr *mr = siw_mem2mr(wqe->mem[0]);
 
-		if (mr->umem == NULL) /* Kernel client */
-			memcpy(payload, (void *)sge->laddr, bytes);
-		else if (c_tx->in_syscall) {
-			if (copy_from_user(payload,
-					   (void *)sge->laddr,
-					   bytes)) {
-				WARN_ON(1);
-				return -1;
-			}
+		if (!mr->mem_obj) {
+			/* Kernel client using kva */
+			memcpy((void *)paddr, (void *)sge->laddr, bytes);
+		} else if (c_tx->in_syscall) {
+			if (copy_from_user((void *)paddr,
+					   (const void __user *)sge->laddr,
+					   bytes))
+				return -EFAULT;
 		} else {
-			unsigned int off =  sge->laddr & ~PAGE_MASK;
-			struct page *p = siw_get_upage(mr->umem, sge->laddr);
+			unsigned int off = sge->laddr & ~PAGE_MASK;
+			struct page *p;
 			char *buffer;
+			int pbl_idx = 0;
 
-			BUG_ON(!p);
+			if (!mr->mem.is_pbl)
+				p = siw_get_upage(mr->umem, sge->laddr);
+			else
+				p = siw_get_pblpage(mr, sge->laddr, &pbl_idx);
 
-#if LINUX_VERSION_CODE < KERNEL_VERSION(2, 6, 37)
-			buffer = kmap_atomic(p, KM_SOFTIRQ0);
-#else
+			if (unlikely(!p))
+				return -EFAULT;
+
 			buffer = kmap_atomic(p);
-#endif
 
 			if (likely(PAGE_SIZE - off >= bytes)) {
-				memcpy(payload, buffer + off, bytes);
-#if LINUX_VERSION_CODE < KERNEL_VERSION(2, 6, 37)
-				kunmap_atomic(buffer, KM_SOFTIRQ0);
-#else
+				memcpy((void *)paddr, buffer + off, bytes);
 				kunmap_atomic(buffer);
-#endif
 			} else {
 				unsigned long part = bytes - (PAGE_SIZE - off);
 
-				memcpy(payload, buffer + off, part);
-#if LINUX_VERSION_CODE < KERNEL_VERSION(2, 6, 37)
-				kunmap_atomic(buffer, KM_SOFTIRQ0);
-#else
+				memcpy((void *)paddr, buffer + off, part);
 				kunmap_atomic(buffer);
-#endif
-				payload += part;
 
-				p = siw_get_upage(mr->umem, sge->laddr + part);
-				BUG_ON(!p);
+				if (!mr->mem.is_pbl)
+					p = siw_get_upage(mr->umem,
+							  sge->laddr + part);
+				else
+					p = siw_get_pblpage(mr,
+							    sge->laddr + part,
+							    &pbl_idx);
+				if (unlikely(!p))
+					return -EFAULT;
 
-#if LINUX_VERSION_CODE < KERNEL_VERSION(2, 6, 37)
-				buffer = kmap_atomic(p, KM_SOFTIRQ0);
-				memcpy(payload, buffer, bytes - part);
-				kunmap_atomic(buffer, KM_SOFTIRQ0);
-#else
 				buffer = kmap_atomic(p);
-				memcpy(payload, buffer, bytes - part);
+				memcpy((void *)(paddr + part), buffer,
+				       bytes - part);
 				kunmap_atomic(buffer);
-#endif
 			}
 		}
 	}
@@ -175,15 +135,13 @@ static int siw_try_1seg(struct siw_iwarp_tx *c_tx, char *payload)
  */
 static int siw_qp_prepare_tx(struct siw_iwarp_tx *c_tx)
 {
-	struct siw_wqe		*wqe = &c_tx->wqe_active;
-	char 			*crc = NULL;
-	int			data = 0;
-
-	dprint(DBG_TX, "(QP%d):\n", TX_QPID(c_tx));
+	struct siw_wqe *wqe = &c_tx->wqe_active;
+	char *crc = NULL;
+	int data = 0;
 
 	switch (tx_type(wqe)) {
-
 	case SIW_OP_READ:
+	case SIW_OP_READ_LOCAL_INV:
 		memcpy(&c_tx->pkt.ctrl,
 		       &iwarp_pktinfo[RDMAP_RDMA_READ_REQ].ctrl,
 		       sizeof(struct iwarp_ctrl));
@@ -200,9 +158,6 @@ static int siw_qp_prepare_tx(struct siw_iwarp_tx *c_tx)
 		c_tx->pkt.rreq.source_to = cpu_to_be64(wqe->sqe.raddr);
 		c_tx->pkt.rreq.read_size = htonl(wqe->sqe.sge[0].length);
 
-		dprint(DBG_TX, ": RREQ: Sink: %x, 0x%016llx\n",
-			wqe->sqe.sge[0].lkey, wqe->sqe.sge[0].laddr);
-
 		c_tx->ctrl_len = sizeof(struct iwarp_rdma_rreq);
 		crc = (char *)&c_tx->pkt.rreq_pkt.crc;
 		break;
@@ -213,20 +168,43 @@ static int siw_qp_prepare_tx(struct siw_iwarp_tx *c_tx)
 			       &iwarp_pktinfo[RDMAP_SEND_SE].ctrl,
 			       sizeof(struct iwarp_ctrl));
 		else
-			memcpy(&c_tx->pkt.ctrl,
-			       &iwarp_pktinfo[RDMAP_SEND].ctrl,
+			memcpy(&c_tx->pkt.ctrl, &iwarp_pktinfo[RDMAP_SEND].ctrl,
 			       sizeof(struct iwarp_ctrl));
 
 		c_tx->pkt.send.ddp_qn = RDMAP_UNTAGGED_QN_SEND;
 		c_tx->pkt.send.ddp_msn =
 			htonl(++c_tx->ddp_msn[RDMAP_UNTAGGED_QN_SEND]);
 		c_tx->pkt.send.ddp_mo = 0;
-		c_tx->pkt.send.rsvd = 0;
+
+		c_tx->pkt.send_inv.inval_stag = 0;
 
 		c_tx->ctrl_len = sizeof(struct iwarp_send);
 
 		crc = (char *)&c_tx->pkt.send_pkt.crc;
-		data = siw_try_1seg(c_tx, crc);
+		data = siw_try_1seg(c_tx, (u64)crc);
+		break;
+
+	case SIW_OP_SEND_REMOTE_INV:
+		if (tx_flags(wqe) & SIW_WQE_SOLICITED)
+			memcpy(&c_tx->pkt.ctrl,
+			       &iwarp_pktinfo[RDMAP_SEND_SE_INVAL].ctrl,
+			       sizeof(struct iwarp_ctrl));
+		else
+			memcpy(&c_tx->pkt.ctrl,
+			       &iwarp_pktinfo[RDMAP_SEND_INVAL].ctrl,
+			       sizeof(struct iwarp_ctrl));
+
+		c_tx->pkt.send.ddp_qn = RDMAP_UNTAGGED_QN_SEND;
+		c_tx->pkt.send.ddp_msn =
+			htonl(++c_tx->ddp_msn[RDMAP_UNTAGGED_QN_SEND]);
+		c_tx->pkt.send.ddp_mo = 0;
+
+		c_tx->pkt.send_inv.inval_stag = cpu_to_be32(wqe->sqe.rkey);
+
+		c_tx->ctrl_len = sizeof(struct iwarp_send_inv);
+
+		crc = (char *)&c_tx->pkt.send_pkt.crc;
+		data = siw_try_1seg(c_tx, (u64)crc);
 		break;
 
 	case SIW_OP_WRITE:
@@ -238,7 +216,7 @@ static int siw_qp_prepare_tx(struct siw_iwarp_tx *c_tx)
 		c_tx->ctrl_len = sizeof(struct iwarp_rdma_write);
 
 		crc = (char *)&c_tx->pkt.write_pkt.crc;
-		data = siw_try_1seg(c_tx, crc);
+		data = siw_try_1seg(c_tx, (u64)crc);
 		break;
 
 	case SIW_OP_READ_RESPONSE:
@@ -252,69 +230,68 @@ static int siw_qp_prepare_tx(struct siw_iwarp_tx *c_tx)
 
 		c_tx->ctrl_len = sizeof(struct iwarp_rdma_rresp);
 
-		dprint(DBG_TX, ": RRESP: Sink: %x, 0x%016llx\n",
-			wqe->sqe.rkey, wqe->sqe.raddr);
-
 		crc = (char *)&c_tx->pkt.write_pkt.crc;
-		data = siw_try_1seg(c_tx, crc);
+		data = siw_try_1seg(c_tx, (u64)crc);
 		break;
 
 	default:
-		dprint(DBG_ON, "Unsupported WQE type %d\n", tx_type(wqe));
-		BUG();
-		break;
+		siw_dbg_qp(tx_qp(c_tx), "stale wqe type %d\n", tx_type(wqe));
+		return -EOPNOTSUPP;
 	}
+	if (unlikely(data < 0))
+		return data;
+
 	c_tx->ctrl_sent = 0;
 
-	if (data >= 0) {
-		if (data > 0) {
+	if (data <= MAX_HDR_INLINE) {
+		if (data) {
 			wqe->processed = data;
 
 			c_tx->pkt.ctrl.mpa_len =
 				htons(c_tx->ctrl_len + data - MPA_HDR_SIZE);
 
-			/* compute eventual pad */
+			/* Add pad, if needed */
 			data += -(int)data & 0x3;
-			/* point CRC after data or pad */
+			/* advance CRC location after payload */
 			crc += data;
-			c_tx->ctrl_len += data + MPA_CRC_SIZE;
+			c_tx->ctrl_len += data;
 
 			if (!(c_tx->pkt.ctrl.ddp_rdmap_ctrl & DDP_FLAG_TAGGED))
 				c_tx->pkt.c_untagged.ddp_mo = 0;
 			else
 				c_tx->pkt.c_tagged.ddp_to =
-				    cpu_to_be64(wqe->sqe.raddr);
-		} else
-			c_tx->ctrl_len += MPA_CRC_SIZE;
+					cpu_to_be64(wqe->sqe.raddr);
+		}
 
 		*(u32 *)crc = 0;
 		/*
 		 * Do complete CRC if enabled and short packet
 		 */
-		if (c_tx->crc_enabled) {
+		if (c_tx->mpa_crc_hd) {
 			if (siw_crc_txhdr(c_tx) != 0)
 				return -EINVAL;
-			crypto_shash_final(&c_tx->mpa_crc_hd, (u8 *)crc);
+			crypto_shash_final(c_tx->mpa_crc_hd, (u8 *)crc);
 		}
+		c_tx->ctrl_len += MPA_CRC_SIZE;
+
 		return PKT_COMPLETE;
 	}
 	c_tx->ctrl_len += MPA_CRC_SIZE;
 	c_tx->sge_idx = 0;
 	c_tx->sge_off = 0;
+	c_tx->pbl_idx = 0;
 
 	/*
 	 * Allow direct sending out of user buffer if WR is non signalled
-	 * and payload is over threshold and no CRC is enabled.
+	 * and payload is over threshold.
 	 * Per RDMA verbs, the application should not change the send buffer
 	 * until the work completed. In iWarp, work completion is only
 	 * local delivery to TCP. TCP may reuse the buffer for
 	 * retransmission. Changing unsent data also breaks the CRC,
 	 * if applied.
 	 */
-	if (zcopy_tx
-	    && wqe->bytes > SENDPAGE_THRESH
-	    && !(tx_flags(wqe) & SIW_WQE_SIGNALLED)
-	    && tx_type(wqe) != SIW_OP_READ)
+	if (c_tx->zcopy_tx && wqe->bytes > SENDPAGE_THRESH &&
+	    !(tx_flags(wqe) & SIW_WQE_SIGNALLED))
 		c_tx->use_sendpage = 1;
 	else
 		c_tx->use_sendpage = 0;
@@ -323,105 +300,79 @@ static int siw_qp_prepare_tx(struct siw_iwarp_tx *c_tx)
 }
 
 /*
- * Send out one complete FPDU. Used for fixed sized packets like
- * Read Requests or zero length SENDs, WRITEs, READ.responses.
- * Also used for pushing an FPDU hdr only.
+ * Send out one complete control type FPDU, or header of FPDU carrying
+ * data. Used for fixed sized packets like Read.Requests or zero length
+ * SENDs, WRITEs, READ.Responses, or header only.
  */
 static inline int siw_tx_ctrl(struct siw_iwarp_tx *c_tx, struct socket *s,
 			      int flags)
 {
-	struct msghdr msg = {.msg_flags = flags};
-	struct kvec iov = {
-		.iov_base = (char *)&c_tx->pkt.ctrl + c_tx->ctrl_sent,
-		.iov_len = c_tx->ctrl_len - c_tx->ctrl_sent};
+	struct msghdr msg = { .msg_flags = flags };
+	struct kvec iov = { .iov_base =
+				    (char *)&c_tx->pkt.ctrl + c_tx->ctrl_sent,
+			    .iov_len = c_tx->ctrl_len - c_tx->ctrl_sent };
 
 	int rv = kernel_sendmsg(s, &msg, &iov, 1,
 				c_tx->ctrl_len - c_tx->ctrl_sent);
-
-	dprint(DBG_TX, " (QP%d): op=%d, %d of %d sent (%d)\n",
-		TX_QPID(c_tx), __rdmap_opcode(&c_tx->pkt.ctrl),
-		c_tx->ctrl_sent + rv, c_tx->ctrl_len, rv);
 
 	if (rv >= 0) {
 		c_tx->ctrl_sent += rv;
 
 		if (c_tx->ctrl_sent == c_tx->ctrl_len) {
-			siw_dprint_hdr(&c_tx->pkt.hdr, TX_QPID(c_tx),
-					"CTRL sent");
-			if (!(flags & MSG_MORE))
-				c_tx->new_tcpseg = 1;
+			siw_dprint_hdr(&c_tx->pkt.hdr, tx_qp(c_tx)->id,
+				       "HDR/CTRL sent");
 			rv = 0;
-		} else if (c_tx->ctrl_sent < c_tx->ctrl_len)
+		} else
 			rv = -EAGAIN;
-		else
-			BUG();
 	}
 	return rv;
 }
 
 /*
- * 0copy TCP transmit interface.
+ * 0copy TCP transmit interface: Use do_tcp_sendpages.
  *
- * Push page array page by page or in one shot.
- * Pushing the whole page array requires the inner do_tcp_sendpages
- * function to be exported by the kernel.
+ * Using sendpage to push page by page appears to be less efficient
+ * than using sendmsg, even if data are copied.
+ *
+ * A general performance limitation might be the extra four bytes
+ * trailer checksum segment to be pushed after user data.
  */
-static int siw_tcp_sendpages(struct socket *s, struct page **page,
-			     int offset, size_t size)
+static int siw_tcp_sendpages(struct socket *s, struct page **page, int offset,
+			     size_t size)
 {
-	int rv = 0;
-
-#ifdef SIW_SENDPAGES_EXPORT
 	struct sock *sk = s->sk;
+	int i = 0, rv = 0, sent = 0,
+	    flags = MSG_MORE | MSG_DONTWAIT | MSG_SENDPAGE_NOTLAST;
 
-	if (!(sk->sk_route_caps & NETIF_F_SG) ||
-	    !(sk->sk_route_caps & NETIF_F_ALL_CSUM)) {
-		/* FIXME:
-		 * This should also be handled in a
-		 * loop
-		 */
-		return -EFAULT;
-	}
-
-	lock_sock(sk);
-	TCP_CHECK_TIMER(sk);
-
-	/*
-	 * just return what sendpages has return
-	 */
-	rv = do_tcp_sendpages(sk, page, offset, size, MSG_MORE|MSG_DONTWAIT);
-
-	TCP_CHECK_TIMER(sk);
-	release_sock(sk);
-	if (rv == -EAGAIN)
-		rv = 0;
-#else
-	/*
-	 * If do_tcp_sendpages() function is not exported
-	 * push page by page
-	 */
-	size_t todo = size;
-	int i;
-
-	for (i = 0; size > 0; i++) {
+	while (size) {
 		size_t bytes = min_t(size_t, PAGE_SIZE - offset, size);
 
-		rv = s->ops->sendpage(s, page[i], offset, bytes,
-				      MSG_MORE|MSG_DONTWAIT);
-		if (rv <= 0)
-			break;
+		if (size + offset <= PAGE_SIZE)
+			flags = MSG_MORE | MSG_DONTWAIT;
 
-		size -= rv;
+		tcp_rate_check_app_limited(sk);
+try_page_again:
+		lock_sock(sk);
+		rv = do_tcp_sendpages(sk, page[i], offset, bytes, flags);
+		release_sock(sk);
 
-		if (rv != bytes)
-			break;
-
-		offset = 0;
+		if (rv > 0) {
+			size -= rv;
+			sent += rv;
+			if (rv != bytes) {
+				offset += rv;
+				bytes -= rv;
+				goto try_page_again;
+			}
+			offset = 0;
+		} else {
+			if (rv == -EAGAIN || rv == 0)
+				break;
+			return rv;
+		}
+		i++;
 	}
-	if (rv >= 0 || rv == -EAGAIN)
-		rv = todo - size;
-#endif
-	return rv;
+	return sent;
 }
 
 /*
@@ -438,10 +389,9 @@ static int siw_0copy_tx(struct socket *s, struct page **page,
 	int i = 0, sent = 0, rv;
 	int sge_bytes = min(sge->length - offset, size);
 
-	offset  = (sge->laddr + offset) & ~PAGE_MASK;
+	offset = (sge->laddr + offset) & ~PAGE_MASK;
 
 	while (sent != size) {
-
 		rv = siw_tcp_sendpages(s, &page[i], offset, sge_bytes);
 		if (rv >= 0) {
 			sent += rv;
@@ -462,6 +412,18 @@ static int siw_0copy_tx(struct socket *s, struct page **page,
 
 #define MAX_TRAILER (MPA_CRC_SIZE + 4)
 
+static void siw_unmap_pages(struct page **pages, int hdr_len, int num_maps)
+{
+	if (hdr_len) {
+		++pages;
+		--num_maps;
+	}
+	while (num_maps-- > 0) {
+		kunmap(*pages);
+		pages++;
+	}
+}
+
 /*
  * siw_tx_hdt() tries to push a complete packet to TCP where all
  * packet fragments are referenced by the elements of one iovec.
@@ -479,26 +441,22 @@ static int siw_0copy_tx(struct socket *s, struct page **page,
  */
 static int siw_tx_hdt(struct siw_iwarp_tx *c_tx, struct socket *s)
 {
-	struct siw_wqe		*wqe = &c_tx->wqe_active;
-	struct siw_sge		*sge = &wqe->sqe.sge[c_tx->sge_idx],
-				*first_sge = sge;
-	union siw_mem_resolved	*mem = &wqe->mem[c_tx->sge_idx];
-	struct siw_mr		*mr = NULL;
+	struct siw_wqe *wqe = &c_tx->wqe_active;
+	struct siw_sge *sge = &wqe->sqe.sge[c_tx->sge_idx];
+	struct siw_mr *mr = NULL;
 
-	struct kvec		iov[MAX_ARRAY];
-	struct page		*page_array[MAX_ARRAY];
-	struct msghdr		msg = {.msg_flags = MSG_DONTWAIT};
+	struct kvec iov[MAX_ARRAY];
+	struct page *page_array[MAX_ARRAY];
+	struct msghdr msg = { .msg_flags = MSG_DONTWAIT | MSG_EOR };
 
-	int			seg = 0, do_crc = c_tx->do_crc, is_kva = 0, rv;
-	unsigned int		data_len = c_tx->bytes_unsent,
-				hdr_len = 0,
-				trl_len = 0,
-				sge_off = c_tx->sge_off,
-				sge_idx = c_tx->sge_idx;
+	int seg = 0, do_crc = c_tx->do_crc, is_kva = 0, rv;
+	unsigned int data_len = c_tx->bytes_unsent, hdr_len = 0, trl_len = 0,
+		     sge_off = c_tx->sge_off, sge_idx = c_tx->sge_idx,
+		     pbl_idx = c_tx->pbl_idx;
 
 	if (c_tx->state == SIW_SEND_HDR) {
 		if (c_tx->use_sendpage) {
-			rv = siw_tx_ctrl(c_tx, s, MSG_DONTWAIT|MSG_MORE);
+			rv = siw_tx_ctrl(c_tx, s, MSG_DONTWAIT | MSG_MORE);
 			if (rv)
 				goto done;
 
@@ -509,22 +467,20 @@ static int siw_tx_hdt(struct siw_iwarp_tx *c_tx, struct socket *s)
 			iov[0].iov_len = hdr_len =
 				c_tx->ctrl_len - c_tx->ctrl_sent;
 			seg = 1;
-			siw_dprint_hdr(&c_tx->pkt.hdr, TX_QPID(c_tx),
-					"HDR to send: ");
+			siw_dprint_hdr(&c_tx->pkt.hdr, tx_qp(c_tx)->id,
+				       "HDR to send");
 		}
 	}
 
 	wqe->processed += data_len;
 
 	while (data_len) { /* walk the list of SGE's */
-		unsigned int	sge_len = min(sge->length - sge_off, data_len);
-		unsigned int	fp_off = (sge->laddr + sge_off) & ~PAGE_MASK;
-
-		BUG_ON(!sge_len);
+		unsigned int sge_len = min(sge->length - sge_off, data_len);
+		unsigned int fp_off = (sge->laddr + sge_off) & ~PAGE_MASK;
 
 		if (!(tx_flags(wqe) & SIW_WQE_INLINE)) {
-			mr = siw_mem2mr(mem->obj);
-			if (!mr->umem)
+			mr = siw_mem2mr(wqe->mem[sge_idx]);
+			if (!mr->mem_obj)
 				is_kva = 1;
 		} else
 			is_kva = 1;
@@ -538,7 +494,7 @@ static int siw_tx_hdt(struct siw_iwarp_tx *c_tx, struct socket *s)
 			iov[seg].iov_len = sge_len;
 
 			if (do_crc)
-				siw_crc_array(&c_tx->mpa_crc_hd,
+				siw_crc_array(c_tx->mpa_crc_hd,
 					      iov[seg].iov_base, sge_len);
 			sge_off += sge_len;
 			data_len -= sge_len;
@@ -549,13 +505,27 @@ static int siw_tx_hdt(struct siw_iwarp_tx *c_tx, struct socket *s)
 		while (sge_len) {
 			size_t plen = min((int)PAGE_SIZE - fp_off, sge_len);
 
-			BUG_ON(plen <= 0);
 			if (!is_kva) {
-				struct page *p =
-					siw_get_upage(mr->umem,
-						      sge->laddr + sge_off);
-				BUG_ON(!p);
+				struct page *p;
 
+				if (mr->mem.is_pbl)
+					p = siw_get_pblpage(
+						mr, sge->laddr + sge_off,
+						&pbl_idx);
+				else
+					p = siw_get_upage(mr->umem,
+							  sge->laddr + sge_off);
+				if (unlikely(!p)) {
+					if (hdr_len)
+						seg--;
+					if (!c_tx->use_sendpage && seg) {
+						siw_unmap_pages(page_array,
+								hdr_len, seg);
+					}
+					wqe->processed -= c_tx->bytes_unsent;
+					rv = -EFAULT;
+					goto done_crc;
+				}
 				page_array[seg] = p;
 
 				if (!c_tx->use_sendpage) {
@@ -563,13 +533,15 @@ static int siw_tx_hdt(struct siw_iwarp_tx *c_tx, struct socket *s)
 					iov[seg].iov_len = plen;
 				}
 				if (do_crc)
-					siw_crc_page(&c_tx->mpa_crc_hd, p,
+					siw_crc_page(c_tx->mpa_crc_hd, p,
 						     fp_off, plen);
 			} else {
 				u64 pa = ((sge->laddr + sge_off) & PAGE_MASK);
+
 				page_array[seg] = virt_to_page(pa);
 				if (do_crc)
-					siw_crc_array(&c_tx->mpa_crc_hd,
+					siw_crc_array(
+						c_tx->mpa_crc_hd,
 						(void *)(sge->laddr + sge_off),
 						plen);
 			}
@@ -580,13 +552,10 @@ static int siw_tx_hdt(struct siw_iwarp_tx *c_tx, struct socket *s)
 			fp_off = 0;
 
 			if (++seg > (int)MAX_ARRAY) {
-				dprint(DBG_ON, "(QP%d): Too many fragments\n",
-				       TX_QPID(c_tx));
+				siw_dbg_qp(tx_qp(c_tx), "to many fragments\n");
 				if (!is_kva && !c_tx->use_sendpage) {
-					int i = (hdr_len > 0) ? 1 : 0;
-					seg--;
-					while (i < seg)
-						kunmap(page_array[i++]);
+					siw_unmap_pages(page_array, hdr_len,
+							seg - 1);
 				}
 				wqe->processed -= c_tx->bytes_unsent;
 				rv = -EMSGSIZE;
@@ -599,7 +568,6 @@ sge_done:
 		    (data_len != 0 || wqe->processed < wqe->bytes)) {
 			sge_idx++;
 			sge++;
-			mem++;
 			sge_off = 0;
 		}
 	}
@@ -615,28 +583,20 @@ sge_done:
 	if (c_tx->pad) {
 		*(u32 *)c_tx->trailer.pad = 0;
 		if (do_crc)
-			siw_crc_array(&c_tx->mpa_crc_hd,
+			siw_crc_array(c_tx->mpa_crc_hd,
 				      (u8 *)&c_tx->trailer.crc - c_tx->pad,
 				      c_tx->pad);
 	}
-	if (!c_tx->crc_enabled)
+	if (!c_tx->mpa_crc_hd)
 		c_tx->trailer.crc = 0;
 	else if (do_crc)
-		crypto_shash_final(&c_tx->mpa_crc_hd,
-				   (u8 *)&c_tx->trailer.crc);
+		crypto_shash_final(c_tx->mpa_crc_hd, (u8 *)&c_tx->trailer.crc);
 
 	data_len = c_tx->bytes_unsent;
 
-	if (c_tx->tcp_seglen >= (int)MPA_MIN_FRAG &&
-				 tx_more_wqe(TX_QP(c_tx))) {
-		msg.msg_flags |= MSG_MORE;
-		c_tx->new_tcpseg = 0;
-	} else
-		c_tx->new_tcpseg = 1;
-
 	if (c_tx->use_sendpage) {
-		rv = siw_0copy_tx(s, page_array, first_sge, c_tx->sge_off,
-				  data_len);
+		rv = siw_0copy_tx(s, page_array, &wqe->sqe.sge[c_tx->sge_idx],
+				  c_tx->sge_off, data_len);
 		if (rv == data_len) {
 			rv = kernel_sendmsg(s, &msg, &iov[seg], 1, trl_len);
 			if (rv > 0)
@@ -647,11 +607,8 @@ sge_done:
 	} else {
 		rv = kernel_sendmsg(s, &msg, iov, seg + 1,
 				    hdr_len + data_len + trl_len);
-		if (!is_kva) {
-			int i = (hdr_len > 0) ? 1 : 0;
-			while (i < seg)
-				kunmap(page_array[i++]);
-		}
+		if (!is_kva)
+			siw_unmap_pages(page_array, hdr_len, seg);
 	}
 	if (rv < (int)hdr_len) {
 		/* Not even complete hdr pushed or negative rv */
@@ -662,7 +619,6 @@ sge_done:
 		}
 		goto done_crc;
 	}
-
 	rv -= hdr_len;
 
 	if (rv >= (int)data_len) {
@@ -671,6 +627,7 @@ sge_done:
 			/* Save the current state for next tx */
 			c_tx->sge_idx = sge_idx;
 			c_tx->sge_off = sge_off;
+			c_tx->pbl_idx = pbl_idx;
 		}
 		rv -= data_len;
 
@@ -708,7 +665,6 @@ sge_done:
 				sge_unsent = sge->length;
 			}
 			c_tx->sge_off += rv;
-			BUG_ON(c_tx->sge_off >= sge->length);
 		}
 		rv = -EAGAIN;
 	}
@@ -718,18 +674,24 @@ done:
 	return rv;
 }
 
-static void siw_calculate_tcpseg(struct siw_iwarp_tx *c_tx, struct socket *s)
+static inline void siw_update_tcpseg(struct siw_iwarp_tx *c_tx,
+				     struct socket *s)
 {
-	/*
-	 * refresh TCP segement len if we start a new segment or
-	 * remaining segment len is less than MPA_MIN_FRAG or
-	 * the socket send buffer is empty.
-	 */
-	if (c_tx->new_tcpseg || c_tx->tcp_seglen < (int)MPA_MIN_FRAG ||
-	     !tcp_send_head(s->sk))
-		c_tx->tcp_seglen = get_tcp_mss(s->sk);
-}
+	struct tcp_sock *tp = tcp_sk(s->sk);
 
+	if (tp->gso_segs) {
+		if (c_tx->gso_seg_limit == 0)
+			c_tx->tcp_seglen = tp->mss_cache * tp->gso_segs;
+		else
+			c_tx->tcp_seglen =
+				tp->mss_cache *
+				min_t(u16, c_tx->gso_seg_limit, tp->gso_segs);
+	} else {
+		c_tx->tcp_seglen = tp->mss_cache;
+	}
+	/* Loopback may give odd numbers */
+	c_tx->tcp_seglen &= 0xfffffff8;
+}
 
 /*
  * siw_unseg_txlen()
@@ -744,13 +706,11 @@ static inline int siw_unseg_txlen(struct siw_iwarp_tx *c_tx)
 	return c_tx->bytes_unsent + c_tx->ctrl_len + pad + MPA_CRC_SIZE;
 }
 
-
 /*
  * siw_prepare_fpdu()
  *
  * Prepares transmit context to send out one FPDU if FPDU will contain
  * user data and user data are not immediate data.
- * Checks and locks involved memory segments of data to be sent.
  * Computes maximum FPDU length to fill up TCP MSS if possible.
  *
  * @qp:		QP from which to transmit
@@ -762,16 +722,11 @@ static inline int siw_unseg_txlen(struct siw_iwarp_tx *c_tx)
  */
 static void siw_prepare_fpdu(struct siw_qp *qp, struct siw_wqe *wqe)
 {
-	struct siw_iwarp_tx	*c_tx  = &qp->tx_ctx;
+	struct siw_iwarp_tx *c_tx = &qp->tx_ctx;
+	int data_len;
 
-	/*
-	 * TODO: TCP Fragmentation dynamics needs for further investigation.
-	 *	 Resuming SQ processing may start with full-sized packet
-	 *	 or short packet which resets MSG_MORE and thus helps
-	 *	 to synchronize.
-	 *	 This version resumes with short packet.
-	 */
-	c_tx->ctrl_len = iwarp_pktinfo[__rdmap_opcode(&c_tx->pkt.ctrl)].hdr_len;
+	c_tx->ctrl_len =
+		iwarp_pktinfo[__rdmap_get_opcode(&c_tx->pkt.ctrl)].hdr_len;
 	c_tx->ctrl_sent = 0;
 
 	/*
@@ -780,97 +735,68 @@ static void siw_prepare_fpdu(struct siw_qp *qp, struct siw_wqe *wqe)
 	if (!(c_tx->pkt.ctrl.ddp_rdmap_ctrl & DDP_FLAG_TAGGED))
 		/* Untagged message */
 		c_tx->pkt.c_untagged.ddp_mo = cpu_to_be32(wqe->processed);
-	else	/* Tagged message */
+	else /* Tagged message */
 		c_tx->pkt.c_tagged.ddp_to =
-		    cpu_to_be64(wqe->sqe.raddr + wqe->processed);
+			cpu_to_be64(wqe->sqe.raddr + wqe->processed);
 
-	/* First guess: one big unsegmented DDP segment */
-	c_tx->bytes_unsent = wqe->bytes - wqe->processed;
-	c_tx->tcp_seglen -= siw_unseg_txlen(c_tx);
-
-	if (c_tx->tcp_seglen >= 0) {
-		/* Whole DDP segment fits into current TCP segment */
-		c_tx->pkt.ctrl.ddp_rdmap_ctrl |= DDP_FLAG_LAST;
-		c_tx->pad = -c_tx->bytes_unsent & 0x3;
-	} else {
+	data_len = wqe->bytes - wqe->processed;
+	if (data_len + c_tx->ctrl_len + MPA_CRC_SIZE > c_tx->tcp_seglen) {
 		/* Trim DDP payload to fit into current TCP segment */
-		c_tx->bytes_unsent += c_tx->tcp_seglen;
-		c_tx->bytes_unsent &= ~0x3;
-		c_tx->pad = 0;
+		data_len = c_tx->tcp_seglen - (c_tx->ctrl_len + MPA_CRC_SIZE);
 		c_tx->pkt.ctrl.ddp_rdmap_ctrl &= ~DDP_FLAG_LAST;
+		c_tx->pad = 0;
+	} else {
+		c_tx->pkt.ctrl.ddp_rdmap_ctrl |= DDP_FLAG_LAST;
+		c_tx->pad = -data_len & 0x3;
 	}
-	c_tx->pkt.ctrl.mpa_len =
-		htons(c_tx->ctrl_len + c_tx->bytes_unsent - MPA_HDR_SIZE);
+	c_tx->bytes_unsent = data_len;
 
-#ifdef SIW_TX_FULLSEGS
-	c_tx->fpdu_len =
-		c_tx->ctrl_len + c_tx->bytes_unsent + c_tx->pad + MPA_CRC_SIZE;
-#endif
+	c_tx->pkt.ctrl.mpa_len =
+		htons(c_tx->ctrl_len + data_len - MPA_HDR_SIZE);
+
 	/*
 	 * Init MPA CRC computation
 	 */
-	if (c_tx->crc_enabled) {
+	if (c_tx->mpa_crc_hd) {
 		siw_crc_txhdr(c_tx);
 		c_tx->do_crc = 1;
 	}
 }
 
-#ifdef SIW_TX_FULLSEGS
-static inline int siw_test_wspace(struct socket *s, struct siw_iwarp_tx *c_tx)
-{
-	struct sock *sk = s->sk;
-	int rv = 0;
-
-	lock_sock(sk);
-	if (sk_stream_wspace(sk) < (int)c_tx->fpdu_len) {
-		set_bit(SOCK_NOSPACE, &s->flags);
-		rv = -EAGAIN;
-	}
-	release_sock(sk);
-
-	return rv;
-}
-#endif
-
 /*
  * siw_check_sgl_tx()
  *
- * Check permissions for a list of SGE's (SGL)
+ * Check permissions for a list of SGE's (SGL).
+ * A successful check will have all memory referenced
+ * for transmission resolved and assigned to the WQE.
  *
  * @pd:		Protection Domain SGL should belong to
- * @sge:	List of SGE to be checked
+ * @wqe:	WQE to be checked
  * @perms:	requested access permissions
  *
  */
 
-int siw_check_sgl_tx(struct siw_pd *pd, struct siw_wqe *wqe,
-		     enum siw_access_flags perms)
+static int siw_check_sgl_tx(struct siw_pd *pd, struct siw_wqe *wqe,
+			    enum ib_access_flags perms)
 {
-	struct siw_sge		*sge = &wqe->sqe.sge[0];
-	union siw_mem_resolved	*mem = &wqe->mem[0];
-	int	num_sge = wqe->sqe.num_sge,
-		len = 0;
-
-	dprint(DBG_WR, "(PD%d): Enter\n", OBJ_ID(pd));
+	struct siw_sge *sge = &wqe->sqe.sge[0];
+	int i, len, num_sge = wqe->sqe.num_sge;
 
 	if (unlikely(num_sge > SIW_MAX_SGE))
 		return -EINVAL;
 
-	while (num_sge-- > 0) {
-		dprint(DBG_WR, "(PD%d): sge=%p, perms=0x%x, "
-			"len=%d, sge->len=%d\n",
-			OBJ_ID(pd), sge, perms, len, sge->length);
+	for (i = 0, len = 0; num_sge; num_sge--, i++, sge++) {
 		/*
 		 * rdma verbs: do not check stag for a zero length sge
 		 */
-		if (sge->length &&
-		    siw_check_sge(pd, sge, mem, perms, 0, sge->length) != 0) {
-			len = -EINVAL;
-			break;
+		if (sge->length) {
+			int rv = siw_check_sge(pd, sge, &wqe->mem[i], perms, 0,
+					       sge->length);
+
+			if (unlikely(rv != E_ACCESS_OK))
+				return rv;
 		}
 		len += sge->length;
-		sge++;
-		mem++;
 	}
 	return len;
 }
@@ -879,119 +805,125 @@ int siw_check_sgl_tx(struct siw_pd *pd, struct siw_wqe *wqe,
  * siw_qp_sq_proc_tx()
  *
  * Process one WQE which needs transmission on the wire.
- * Return with:
- *	-EAGAIN, if handover to tcp remained incomplete
- *	0,	 if handover to tcp complete
- *	< 0,	 if other errors happend.
- *
- * @qp:		QP to send from
- * @wqe:	WQE causing transmission
  */
 static int siw_qp_sq_proc_tx(struct siw_qp *qp, struct siw_wqe *wqe)
 {
-	struct siw_iwarp_tx	*c_tx = &qp->tx_ctx;
-	struct socket		*s = qp->attrs.llp_stream_handle;
-	int			rv = 0,
-				burst_len = qp->tx_ctx.burst;
+	struct siw_iwarp_tx *c_tx = &qp->tx_ctx;
+	struct socket *s = qp->attrs.sk;
+	int rv = 0, burst_len = qp->tx_ctx.burst;
+	enum rdmap_ecode ecode = RDMAP_ECODE_CATASTROPHIC_STREAM;
 
-	if (unlikely(wqe->wr_status == SR_WR_IDLE)) {
-		WARN_ON(1);
+	if (unlikely(wqe->wr_status == SIW_WR_IDLE))
 		return 0;
-	}
+
 	if (!burst_len)
 		burst_len = SQ_USER_MAXBURST;
 
-	if (wqe->wr_status == SR_WR_QUEUED) {
+	if (wqe->wr_status == SIW_WR_QUEUED) {
 		if (!(wqe->sqe.flags & SIW_WQE_INLINE)) {
 			if (tx_type(wqe) == SIW_OP_READ_RESPONSE)
 				wqe->sqe.num_sge = 1;
 
-			if (tx_type(wqe) != SIW_OP_READ) {
+			if (tx_type(wqe) != SIW_OP_READ &&
+			    tx_type(wqe) != SIW_OP_READ_LOCAL_INV) {
 				/*
-				 * Reference memory to be tx'd
+				 * Reference memory to be tx'd w/o checking
+				 * access for LOCAL_READ permission, since
+				 * not defined in RDMA core.
 				 */
-				rv = siw_check_sgl_tx(qp->pd, wqe,
-						      SR_MEM_LREAD);
-				if (rv < 0)
-					return rv;
-
+				rv = siw_check_sgl_tx(qp->pd, wqe, 0);
+				if (rv < 0) {
+					if (tx_type(wqe) ==
+					    SIW_OP_READ_RESPONSE)
+						ecode = siw_rdmap_error(-rv);
+					rv = -EINVAL;
+					goto tx_error;
+				}
 				wqe->bytes = rv;
-			} else
+			} else {
 				wqe->bytes = 0;
+			}
 		} else {
 			wqe->bytes = wqe->sqe.sge[0].length;
 			if (!qp->kernel_verbs) {
-				if (wqe->bytes > SIW_MAX_INLINE)
-					return -EINVAL;
+				if (wqe->bytes > SIW_MAX_INLINE) {
+					rv = -EINVAL;
+					goto tx_error;
+				}
 				wqe->sqe.sge[0].laddr = (u64)&wqe->sqe.sge[1];
 			}
 		}
-		wqe->wr_status = SR_WR_INPROGRESS;
+		wqe->wr_status = SIW_WR_INPROGRESS;
 		wqe->processed = 0;
 
-		siw_calculate_tcpseg(c_tx, s);
+		siw_update_tcpseg(c_tx, s);
 
 		rv = siw_qp_prepare_tx(c_tx);
 		if (rv == PKT_FRAGMENTED) {
 			c_tx->state = SIW_SEND_HDR;
 			siw_prepare_fpdu(qp, wqe);
-		} else if (rv == PKT_COMPLETE)
+		} else if (rv == PKT_COMPLETE) {
 			c_tx->state = SIW_SEND_SHORT_FPDU;
-		else
-			goto tx_done;
+		} else {
+			goto tx_error;
+		}
 	}
 
 next_segment:
+	siw_dbg_qp(qp, "wr type %d, state %d, data %u, sent %u, id %llx\n",
+		   tx_type(wqe), wqe->wr_status, wqe->bytes, wqe->processed,
+		   wqe->sqe.id);
+
 	if (--burst_len == 0) {
 		rv = -EINPROGRESS;
 		goto tx_done;
 	}
-	dprint(DBG_WR|DBG_TX,
-		" QP(%d): WR type %d, state %d, data %u, sent %u, id %llx\n",
-		QP_ID(qp), tx_type(wqe), wqe->wr_status, wqe->bytes,
-		wqe->processed, wqe->sqe.id);
-
-#ifdef SIW_TX_FULLSEGS
-	rv = siw_test_wspace(s, c_tx);
-	if (rv < 0)
-		goto tx_done;
-#endif
-
 	if (c_tx->state == SIW_SEND_SHORT_FPDU) {
 		enum siw_opcode tx_type = tx_type(wqe);
+		unsigned int msg_flags;
 
-		/*
-		 * Always end current TCP segment (no MSG_MORE flag):
-		 * trying to fill segment would result in excessive delay.
-		 */
-		rv = siw_tx_ctrl(c_tx, s, MSG_DONTWAIT);
+		if (siw_sq_empty(qp) || !siw_tcp_nagle || burst_len == 1)
+			/*
+			 * End current TCP segment, if SQ runs empty,
+			 * or siw_tcp_nagle is not set, or we bail out
+			 * soon due to no burst credit left.
+			 */
+			msg_flags = MSG_DONTWAIT;
+		else
+			msg_flags = MSG_DONTWAIT | MSG_MORE;
 
-		if (!rv && tx_type != SIW_OP_READ)
+		rv = siw_tx_ctrl(c_tx, s, msg_flags);
+
+		if (!rv && tx_type != SIW_OP_READ &&
+		    tx_type != SIW_OP_READ_LOCAL_INV)
 			wqe->processed = wqe->bytes;
 
 		goto tx_done;
 
-	} else
+	} else {
 		rv = siw_tx_hdt(c_tx, s);
-
+	}
 	if (!rv) {
-		/* Verbs, 6.4.: Try stopping sending after a full DDP segment
-		 * if the connection goes down (== peer halfclose)
+		/*
+		 * One segment sent. Processing completed if last
+		 * segment, Do next segment otherwise.
 		 */
 		if (unlikely(c_tx->tx_suspend)) {
+			/*
+			 * Verbs, 6.4.: Try stopping sending after a full
+			 * DDP segment if the connection goes down
+			 * (== peer halfclose)
+			 */
 			rv = -ECONNABORTED;
 			goto tx_done;
-		} else if (c_tx->pkt.ctrl.ddp_rdmap_ctrl & DDP_FLAG_LAST) {
-			/*
-			 * One segment sent. Processing completed if last
-			 * segment, Do next segment otherwise.
-			 */
-			dprint(DBG_TX, "(QP%d): WR completed\n", QP_ID(qp));
+		}
+		if (c_tx->pkt.ctrl.ddp_rdmap_ctrl & DDP_FLAG_LAST) {
+			siw_dbg_qp(qp, "WQE completed\n");
 			goto tx_done;
 		}
 		c_tx->state = SIW_SEND_HDR;
 
-		siw_calculate_tcpseg(c_tx, s);
+		siw_update_tcpseg(c_tx, s);
 
 		siw_prepare_fpdu(qp, wqe);
 		goto next_segment;
@@ -999,16 +931,78 @@ next_segment:
 tx_done:
 	qp->tx_ctx.burst = burst_len;
 	return rv;
+
+tx_error:
+	if (ecode != RDMAP_ECODE_CATASTROPHIC_STREAM)
+		siw_init_terminate(qp, TERM_ERROR_LAYER_RDMAP,
+				   RDMAP_ETYPE_REMOTE_PROTECTION, ecode, 1);
+	else
+		siw_init_terminate(qp, TERM_ERROR_LAYER_RDMAP,
+				   RDMAP_ETYPE_CATASTROPHIC,
+				   RDMAP_ECODE_UNSPECIFIED, 1);
+	return rv;
 }
 
+static int siw_fastreg_mr(struct siw_pd *pd, struct siw_sqe *sqe)
+{
+	struct siw_mem *mem = siw_mem_id2obj(pd->sdev, sqe->rkey  >> 8);
+	struct siw_mr *mr;
+	int rv = 0;
+
+	siw_dbg_pd(pd, "STag 0x%08x\n", sqe->rkey);
+
+	if (unlikely(!mem)) {
+		pr_warn("siw: fastreg: STag 0x%08x unknown\n", sqe->rkey);
+		return -EINVAL;
+	}
+	mr = siw_mem2mr(mem);
+
+	if (unlikely(&mr->base_mr != (void *)sqe->base_mr)) {
+		pr_warn("siw: fastreg: STag 0x%08x: bad MR\n", sqe->rkey);
+		rv = -EINVAL;
+		goto out;
+	}
+	if (unlikely(mr->pd != pd)) {
+		pr_warn("siw: fastreg: PD mismatch\n");
+		rv = -EINVAL;
+		goto out;
+	}
+	if (unlikely(mem->stag_valid)) {
+		pr_warn("siw: fastreg: STag 0x%08x already valid\n", sqe->rkey);
+		rv = -EINVAL;
+		goto out;
+	}
+	/* Refresh STag since user may have changed key part */
+	mem->stag = sqe->rkey;
+	mem->perms = sqe->access;
+
+	siw_dbg_mem(mem, "STag now valid, MR va: 0x%016llx -> 0x%016llx\n",
+		    mem->va, mr->base_mr.iova);
+	mem->va = mr->base_mr.iova;
+	mem->stag_valid = 1;
+out:
+	siw_mem_put(mem);
+	return rv;
+}
 
 static int siw_qp_sq_proc_local(struct siw_qp *qp, struct siw_wqe *wqe)
 {
-	pr_info("local WR's not yet implemented\n");
-	BUG();
-	return 0;
-}
+	int rv;
 
+	switch (tx_type(wqe)) {
+	case SIW_OP_REG_MR:
+		rv = siw_fastreg_mr(qp->pd, &wqe->sqe);
+		break;
+
+	case SIW_OP_INVAL_STAG:
+		rv = siw_invalidate_stag(qp->pd, wqe->sqe.rkey);
+		break;
+
+	default:
+		rv = -EINVAL;
+	}
+	return rv;
+}
 
 /*
  * siw_qp_sq_process()
@@ -1028,44 +1022,35 @@ static int siw_qp_sq_proc_local(struct siw_qp *qp, struct siw_wqe *wqe)
  *
  * Must be called with the QP state read-locked.
  *
- * TODO:
- * To be solved more seriously: an outbound RREQ can be satisfied
- * by the corresponding RRESP _before_ it gets assigned to the ORQ.
- * This happens regularly in RDMA READ via loopback case. Since both
- * outbound RREQ and inbound RRESP can be handled by the same CPU
- * locking the ORQ is dead-lock prone and thus not an option.
- * Tentatively, the RREQ gets assigned to the ORQ _before_ being
- * sent (and pulled back in case of send failure).
+ * Note:
+ * An outbound RREQ can be satisfied by the corresponding RRESP
+ * _before_ it gets assigned to the ORQ. This happens regularly
+ * in RDMA READ via loopback case. Since both outbound RREQ and
+ * inbound RRESP can be handled by the same CPU, locking the ORQ
+ * is dead-lock prone and thus not an option. With that, the
+ * RREQ gets assigned to the ORQ _before_ being sent - see
+ * siw_activate_tx() - and pulled back in case of send failure.
  */
 int siw_qp_sq_process(struct siw_qp *qp)
 {
-	struct siw_wqe		*wqe = tx_wqe(qp);
-	enum siw_opcode		tx_type;
-	unsigned long		flags;
-	int			rv = 0;
+	struct siw_wqe *wqe = tx_wqe(qp);
+	enum siw_opcode tx_type;
+	unsigned long flags;
+	int rv = 0;
 
+	siw_dbg_qp(qp, "enter for type %d\n", tx_type(wqe));
 
-	wait_event(qp->tx_ctx.waitq, !atomic_read(&qp->tx_ctx.in_use));
-
-	if (atomic_inc_return(&qp->tx_ctx.in_use) > 1) {
-		/*
-		 * at least two waiters: that should never happen!
-		 */
-		WARN_ON(1);
-		atomic_dec(&qp->tx_ctx.in_use);
-		return 0;
-	}
 next_wqe:
 	/*
 	 * Stop QP processing if SQ state changed
 	 */
 	if (unlikely(qp->tx_ctx.tx_suspend)) {
-		dprint(DBG_WR|DBG_TX, "(QP%d): tx suspend\n", QP_ID(qp));
+		siw_dbg_qp(qp, "tx suspended\n");
 		goto done;
 	}
 	tx_type = tx_type(wqe);
 
-	if (SIW_WQE_IS_TX(wqe))
+	if (tx_type <= SIW_OP_READ_RESPONSE)
 		rv = siw_qp_sq_proc_tx(qp, wqe);
 	else
 		rv = siw_qp_sq_proc_local(qp, wqe);
@@ -1075,16 +1060,19 @@ next_wqe:
 		 * WQE processing done
 		 */
 		switch (tx_type) {
-
 		case SIW_OP_SEND:
+		case SIW_OP_SEND_REMOTE_INV:
 		case SIW_OP_WRITE:
 			siw_wqe_put_mem(wqe, tx_type);
+		case SIW_OP_INVAL_STAG:
+		case SIW_OP_REG_MR:
 			if (tx_flags(wqe) & SIW_WQE_SIGNALLED)
 				siw_sqe_complete(qp, &wqe->sqe, wqe->bytes,
 						 SIW_WC_SUCCESS);
 			break;
 
 		case SIW_OP_READ:
+		case SIW_OP_READ_LOCAL_INV:
 			/*
 			 * already enqueued to ORQ queue
 			 */
@@ -1095,29 +1083,29 @@ next_wqe:
 			break;
 
 		default:
-			BUG();
+			WARN(1, "undefined WQE type %d\n", tx_type);
+			rv = -EINVAL;
+			goto done;
 		}
 
-		lock_sq_rxsave(qp, flags);
-		wqe->wr_status = SR_WR_IDLE;
+		spin_lock_irqsave(&qp->sq_lock, flags);
+		wqe->wr_status = SIW_WR_IDLE;
 		rv = siw_activate_tx(qp);
-		unlock_sq_rxsave(qp, flags);
+		spin_unlock_irqrestore(&qp->sq_lock, flags);
 
-		if (unlikely(rv <= 0))
+		if (rv <= 0)
 			goto done;
 
 		goto next_wqe;
 
 	} else if (rv == -EAGAIN) {
-		dprint(DBG_WR|DBG_TX,
-			"(QP%d): SQ paused: hd/tr %d of %d, data %d\n",
-			QP_ID(qp), qp->tx_ctx.ctrl_sent, qp->tx_ctx.ctrl_len,
-			qp->tx_ctx.bytes_unsent);
+		siw_dbg_qp(qp, "sq paused: hd/tr %d of %d, data %d\n",
+			   qp->tx_ctx.ctrl_sent, qp->tx_ctx.ctrl_len,
+			   qp->tx_ctx.bytes_unsent);
 		rv = 0;
 		goto done;
 	} else if (rv == -EINPROGRESS) {
-		siw_sq_queue_work(qp);
-		rv = 0;
+		rv = siw_sq_start(qp);
 		goto done;
 	} else {
 		/*
@@ -1132,19 +1120,20 @@ next_wqe:
 		 * o TODO: Implement more precise work completion errors,
 		 *         see enum ib_wc_status in ib_verbs.h
 		 */
-		dprint(DBG_ON, " (QP%d): WQE type %d processing failed: %d\n",
-				QP_ID(qp), tx_type(wqe), rv);
+		siw_dbg_qp(qp, "wqe type %d processing failed: %d\n",
+			   tx_type(wqe), rv);
 
-		lock_sq_rxsave(qp, flags);
+		spin_lock_irqsave(&qp->sq_lock, flags);
 		/*
 		 * RREQ may have already been completed by inbound RRESP!
 		 */
-		if (tx_type == SIW_OP_READ) {
+		if (tx_type == SIW_OP_READ ||
+		    tx_type == SIW_OP_READ_LOCAL_INV) {
 			/* Cleanup pending entry in ORQ */
 			qp->orq_put--;
 			qp->orq[qp->orq_put % qp->attrs.orq_size].flags = 0;
 		}
-		unlock_sq_rxsave(qp, flags);
+		spin_unlock_irqrestore(&qp->sq_lock, flags);
 		/*
 		 * immediately suspends further TX processing
 		 */
@@ -1152,11 +1141,15 @@ next_wqe:
 			siw_qp_cm_drop(qp, 0);
 
 		switch (tx_type) {
-
 		case SIW_OP_SEND:
+		case SIW_OP_SEND_REMOTE_INV:
+		case SIW_OP_SEND_WITH_IMM:
 		case SIW_OP_WRITE:
 		case SIW_OP_READ:
+		case SIW_OP_READ_LOCAL_INV:
 			siw_wqe_put_mem(wqe, tx_type);
+		case SIW_OP_INVAL_STAG:
+		case SIW_OP_REG_MR:
 			siw_sqe_complete(qp, &wqe->sqe, wqe->bytes,
 					 SIW_WC_LOC_QP_OP_ERR);
 
@@ -1165,9 +1158,7 @@ next_wqe:
 			break;
 
 		case SIW_OP_READ_RESPONSE:
-			dprint(DBG_WR|DBG_TX|DBG_ON, "(QP%d): "
-				   "Processing RRESPONSE failed with %d\n",
-				    QP_ID(qp), rv);
+			siw_dbg_qp(qp, "proc. read.response failed: %d\n", rv);
 
 			siw_qp_event(qp, IB_EVENT_QP_REQ_ERR);
 
@@ -1176,112 +1167,36 @@ next_wqe:
 			break;
 
 		default:
-			BUG();
+			WARN(1, "undefined WQE type %d\n", tx_type);
+			rv = -EINVAL;
 		}
-		wqe->wr_status = SR_WR_IDLE;
+		wqe->wr_status = SIW_WR_IDLE;
 	}
 done:
-	atomic_dec(&qp->tx_ctx.in_use);
-	wake_up(&qp->tx_ctx.waitq);
-
 	return rv;
 }
 
-static struct workqueue_struct *siw_sq_wq;
-
-int __init siw_sq_worker_init(void)
+static void siw_sq_resume(struct siw_qp *qp)
 {
-	siw_sq_wq = alloc_workqueue("siw_sq_wq", WQ_HIGHPRI, 0);
-	if (!siw_sq_wq)
-		return -ENOMEM;
-
-	dprint(DBG_TX|DBG_OBJ, " Init WQ\n");
-	return 0;
-}
-
-
-void siw_sq_worker_exit(void)
-{
-	dprint(DBG_TX|DBG_OBJ, " Destroy WQ\n");
-	if (siw_sq_wq) {
-		flush_workqueue(siw_sq_wq);
-		destroy_workqueue(siw_sq_wq);
-	}
-}
-
-#ifndef USE_SQ_KTHREAD
-/*
- * siw_sq_work_handler()
- *
- * Scheduled by siw_qp_llp_write_space() socket callback if socket
- * send space became available again. This function resumes SQ
- * processing.
- */
-static void siw_sq_work_handler(struct work_struct *w)
-{
-	struct siw_sq_work	*this_work;
-	struct siw_qp		*qp;
-	int			rv;
-
-	this_work = container_of(w, struct siw_sq_work, work);
-	qp = container_of(this_work, struct siw_qp, sq_work);
-
-	dprint(DBG_TX|DBG_OBJ, "(QP%d)\n", QP_ID(qp));
-
 	if (down_read_trylock(&qp->state_lock)) {
 		if (likely(qp->attrs.state == SIW_QP_STATE_RTS &&
 			   !qp->tx_ctx.tx_suspend)) {
+			int rv = siw_qp_sq_process(qp);
 
-			if (qp->tx_ctx.orq_fence) {
-				pr_warn("QP[%d]: work handler in fence\n",
-					QP_ID(qp));
-				goto out;
-			}
-			rv = siw_qp_sq_process(qp);
 			up_read(&qp->state_lock);
-			if (rv < 0) {
-				dprint(DBG_TX, "(QP%d): failed: %d\n",
-					QP_ID(qp), rv);
+
+			if (unlikely(rv < 0)) {
+				siw_dbg_qp(qp, "SQ task failed: err %d\n", rv);
 
 				if (!qp->tx_ctx.tx_suspend)
 					siw_qp_cm_drop(qp, 0);
 			}
 		} else {
-			dprint(DBG_ON|DBG_TX, "(QP%d): state: %d %d\n",
-				QP_ID(qp), qp->attrs.state,
-					qp->tx_ctx.tx_suspend);
 			up_read(&qp->state_lock);
 		}
 	} else {
-		dprint(DBG_ON|DBG_TX, "(QP%d): QP locked\n", QP_ID(qp));
+		siw_dbg_qp(qp, "Resume SQ while QP locked\n");
 	}
-out:
-	siw_qp_put(qp);
-}
-#else
-
-void siw_sq_run(unsigned long arg)
-{
-	struct siw_qp *qp = (struct siw_qp *)arg;
-
-	if (down_read_trylock(&qp->state_lock)) {
-		if (likely(qp->attrs.state == SIW_QP_STATE_RTS &&
-			!qp->tx_ctx.tx_suspend)) {
-
-			int rv = siw_qp_sq_process(qp);
-			up_read(&qp->state_lock);
-
-			if (unlikely(rv < 0)) {
-				pr_info("QP[%d]: SQ task failed: %d\n",
-					QP_ID(qp), rv);
-				if (!qp->tx_ctx.tx_suspend)
-					siw_qp_cm_drop(qp, 0);
-			}
-		} else
-			up_read(&qp->state_lock);
-	} else
-		pr_info("QP[%d]: sq_run while QP locked\n", QP_ID(qp));
-
 	siw_qp_put(qp);
 }
 
@@ -1290,15 +1205,19 @@ struct tx_task_t {
 	wait_queue_head_t waiting;
 };
 
-DEFINE_PER_CPU(struct tx_task_t, tx_task_g);
+static DEFINE_PER_CPU(struct tx_task_t, tx_task_g);
+
+void siw_stop_tx_thread(int nr_cpu)
+{
+	kthread_stop(siw_tx_thread[nr_cpu]);
+	wake_up(&per_cpu(tx_task_g, nr_cpu).waiting);
+}
 
 int siw_run_sq(void *data)
 {
 	const int nr_cpu = (unsigned int)(long)data;
 	struct llist_node *active;
 	struct siw_qp *qp;
-	struct siw_qp *next_qp;
-	unsigned long stoptime = jiffies;
 	struct tx_task_t *tx_task = &per_cpu(tx_task_g, nr_cpu);
 
 	init_llist_head(&tx_task->active);
@@ -1307,107 +1226,66 @@ int siw_run_sq(void *data)
 	pr_info("Started siw TX thread on CPU %u\n", nr_cpu);
 
 	while (1) {
-		if (!low_delay_tx || time_after(jiffies, stoptime)) {
-			wait_event_interruptible(tx_task->waiting,
-				kthread_should_stop() ||
-				!llist_empty(&tx_task->active));
+		struct llist_node *fifo_list = NULL;
 
-			if (kthread_should_stop())
-				break;
-		} else {
-			set_current_state(TASK_INTERRUPTIBLE);
-			if (kthread_should_stop())
-				break;
+		wait_event_interruptible(tx_task->waiting,
+					 !llist_empty(&tx_task->active) ||
+						 kthread_should_stop());
 
-			cond_resched();
-			__set_current_state(TASK_RUNNING);
-		}
+		if (kthread_should_stop())
+			break;
 
 		active = llist_del_all(&tx_task->active);
-		if (active != NULL) {
-/*
- * llist_for_each_entry_safe() is #defined as a macro
- * only for kernel versions >= 3.12.
- */
-#if defined llist_for_each_entry_safe
-			llist_for_each_entry_safe(qp, next_qp, active,
-						  tx_list) {
-#else
-			qp = llist_entry(active, struct siw_qp, tx_list);
-			
-			for (; &qp->tx_list != NULL &&
-			       (next_qp = llist_entry(qp->tx_list.next,
-						      struct siw_qp,
-						      tx_list), true);
-			     qp = next_qp) {
-#endif
-				qp->tx_list.next = NULL;
-				siw_sq_run((unsigned long)qp);
-			}
-			stoptime = jiffies + HZ;
+		/*
+		 * llist_del_all returns a list with newest entry first.
+		 * Re-order list for fairness among QP's.
+		 */
+		while (active) {
+			struct llist_node *tmp = active;
+
+			active = llist_next(active);
+			tmp->next = fifo_list;
+			fifo_list = tmp;
 		}
-	}
-	while (!kthread_should_stop()) {
-		schedule();
-		set_current_state(TASK_INTERRUPTIBLE);
+		while (fifo_list) {
+			qp = container_of(fifo_list, struct siw_qp, tx_list);
+			fifo_list = llist_next(fifo_list);
+			qp->tx_list.next = NULL;
+
+			siw_sq_resume(qp);
+		}
 	}
 	active = llist_del_all(&tx_task->active);
-	if (active != NULL) {
+	if (active) {
 		llist_for_each_entry(qp, active, tx_list) {
 			qp->tx_list.next = NULL;
-			siw_sq_run((unsigned long)qp);
+			siw_sq_resume(qp);
 		}
 	}
-
-	__set_current_state(TASK_RUNNING);
-
 	pr_info("Stopped siw TX thread on CPU %u\n", nr_cpu);
+
 	return 0;
 }
 
-static int siw_qp_to_tx(struct siw_qp *qp)
+int siw_sq_start(struct siw_qp *qp)
 {
-	int cpu = qp->cpu;
+	if (tx_wqe(qp)->wr_status == SIW_WR_IDLE)
+		return 0;
 
-	if (!cpu_online(cpu) || qp_tx_thread[cpu] == NULL)
-		cpu = default_tx_cpu;
+	if (unlikely(!cpu_online(qp->tx_cpu))) {
+		siw_put_tx_cpu(qp->tx_cpu);
+		qp->tx_cpu = siw_get_tx_cpu(qp->sdev);
+		if (qp->tx_cpu < 0) {
+			pr_warn("siw: no tx cpu available\n");
 
-	if (unlikely(cpu < 0)) {
-		WARN_ON(1);
-		goto out;
-	}
-	if (!llist_empty(&per_cpu(tx_task_g, cpu).active)) {
-		int new_cpu;
-		for_each_online_cpu(new_cpu) {
-			if (qp_tx_thread[new_cpu] != NULL &&
-			    llist_empty(&per_cpu(tx_task_g, new_cpu).active)) {
-				cpu = new_cpu;
-				qp->cpu = new_cpu;
-				break;
-			}
+			return -EIO;
 		}
 	}
-
 	siw_qp_get(qp);
-	llist_add(&qp->tx_list, &per_cpu(tx_task_g, cpu).active);
 
-	wake_up(&per_cpu(tx_task_g, cpu).waiting);
+	llist_add(&qp->tx_list, &per_cpu(tx_task_g, qp->tx_cpu).active);
 
-out:
+	wake_up(&per_cpu(tx_task_g, qp->tx_cpu).waiting);
+
 	return 0;
-}
-#endif
-
-
-int siw_sq_queue_work(struct siw_qp *qp)
-{
-	dprint(DBG_TX|DBG_OBJ, "(qp%d)\n", QP_ID(qp));
-
-#ifdef USE_SQ_KTHREAD
-	return siw_qp_to_tx(qp);
-#else
-	siw_qp_get(qp);
-	INIT_WORK(&qp->sq_work.work, siw_sq_work_handler);
-	return queue_work(siw_sq_wq, &qp->sq_work.work);
-#endif
 }
