@@ -100,7 +100,7 @@
  * DBG_TX|DBG_ON		+ transmit path
  * DBG_ALL			All categories
  */
-#define DPRINT_MASK	(DBG_ON|DBG_MM)
+#define DPRINT_MASK	(DBG_ON)
 
 struct siw_dev;
 struct siw_iwarp_rx;
