@@ -1040,6 +1040,11 @@ static int siw_fastreg_mr(struct siw_pd *pd, struct siw_sqe *sqe)
 		goto out;
 	}
 	mem->perms = sqe->access;
+	if (mem->len != mr->ofa_mr.length) {
+		dprint(DBG_MM, ": Length Missmatch STag: %u mem->len=%u mr->ofa_mr.length=%u\n",
+			sqe->rkey >> 8, (unsigned)mem->len, (unsigned)mr->ofa_mr.length);
+	}
+	mem->va = mr->ofa_mr.iova;
 	mem->stag_valid = 1;
 	dprint(DBG_MM, ": STag now valid: %u\n", sqe->rkey >> 8);
 out:
